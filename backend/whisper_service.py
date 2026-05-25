@@ -7,15 +7,15 @@ Uses CTranslate2 for optimized inference on CPU/GPU.
 Anti-hallucination measures:
 - VAD filter with tuned sensitivity
 - condition_on_previous_text=False to prevent repetition loops
-- Compression ratio & log probability thresholds
-- Post-processing to detect and remove repetitive hallucinated segments
+- Stricter compression ratio & log probability thresholds
+- N-gram frequency analysis to detect repetitive hallucination patterns
+- Consecutive duplicate segment removal
 """
 from __future__ import annotations
 import logging
 import os
 import re
 import subprocess
-from collections import Counter
 from typing import Optional, Callable
 from faster_whisper import WhisperModel as FWModel
 from models import TranscriptionResult, TranscriptionSegment, WordTimestamp, WhisperModel
@@ -72,7 +72,7 @@ def _extract_audio_wav(input_path: str) -> Optional[str]:
         if result.returncode == 0 and os.path.exists(audio_path):
             file_size = os.path.getsize(audio_path)
             logger.info(f"Extracted audio: {audio_path} ({file_size} bytes)")
-            if file_size > 1000:  # WAV header is 44 bytes; must have actual data
+            if file_size > 1000:
                 return audio_path
             else:
                 logger.warning("Extracted audio file too small — likely no audio track")
@@ -88,44 +88,68 @@ def _extract_audio_wav(input_path: str) -> Optional[str]:
 
 def _is_hallucinated_segment(text: str) -> bool:
     """
-    Detect if a segment is a Whisper hallucination.
+    Detect if a segment is a Whisper hallucination using n-gram frequency analysis.
 
-    Common hallucination patterns:
-    - Extremely repetitive text (e.g. "โอเคโอเคโอเค...")
-    - Common hallucination phrases repeated
-    - Very short repeated units making up the whole text
+    This catches patterns like:
+    - "โอเคโอเคโอเค..." (same phrase repeated)
+    - "โอโนโนโนโนโน..." (variant pattern with high-frequency substring)
+    - "ขอบคุณที่รับชม" (common ending hallucination)
     """
     text = text.strip()
     if not text:
         return True
-
-    # Check for extremely short text that's unlikely to be real
     if len(text) <= 1:
         return True
 
-    # ----- Repetition detection -----
-    # Check if a short substring repeats to form most of the text
+    # Remove whitespace for pattern analysis
     clean = re.sub(r'\s+', '', text)
     text_len = len(clean)
 
-    if text_len >= 6:
-        # Try substring lengths from 1 to 10 characters
-        for sub_len in range(1, min(11, text_len // 2 + 1)):
-            sub = clean[:sub_len]
-            repeat_count = clean.count(sub)
-            coverage = (repeat_count * sub_len) / text_len
-            # If a short pattern covers >70% of the text, it's likely hallucination
-            if coverage > 0.70 and repeat_count >= 3:
-                logger.info(f"Hallucination detected: '{sub}' repeated {repeat_count}x, coverage={coverage:.0%}")
-                return True
+    if text_len < 6:
+        return False
 
-    # ----- Known hallucination phrases -----
+    # ----- N-gram frequency analysis -----
+    # Instead of only checking the prefix, find the MOST FREQUENT n-gram
+    # of each length and check if it dominates the text
+    for ngram_len in range(1, min(12, text_len // 2 + 1)):
+        # Count all n-grams of this length
+        ngram_counts: dict[str, int] = {}
+        for i in range(text_len - ngram_len + 1):
+            ngram = clean[i:i + ngram_len]
+            ngram_counts[ngram] = ngram_counts.get(ngram, 0) + 1
+
+        if not ngram_counts:
+            continue
+
+        # Find the most frequent n-gram
+        top_ngram = max(ngram_counts, key=ngram_counts.get)  # type: ignore
+        top_count = ngram_counts[top_ngram]
+
+        # Calculate how much of the text is covered by this n-gram
+        coverage = (top_count * ngram_len) / text_len
+
+        # For very short n-grams (1-2 chars), require higher coverage
+        # For longer n-grams (3+), lower coverage threshold
+        if ngram_len <= 2:
+            threshold = 0.65
+            min_repeats = 5
+        elif ngram_len <= 5:
+            threshold = 0.55
+            min_repeats = 4
+        else:
+            threshold = 0.50
+            min_repeats = 3
+
+        if coverage > threshold and top_count >= min_repeats:
+            logger.info(
+                f"Hallucination detected: n-gram '{top_ngram}' (len={ngram_len}) "
+                f"appears {top_count}x, coverage={coverage:.0%} in: '{text[:60]}'"
+            )
+            return True
+
+    # ----- Known standalone hallucination phrases -----
     hallucination_phrases = [
         "ขอบคุณที่รับชม",
-        "ขอบคุณครับ",
-        "ขอบคุณค่ะ",
-        "สวัสดีค่ะ",
-        "สวัสดีครับ",
         "thank you for watching",
         "thanks for watching",
         "please subscribe",
@@ -135,20 +159,20 @@ def _is_hallucinated_segment(text: str) -> bool:
     ]
     lower_text = text.lower().strip()
     for phrase in hallucination_phrases:
-        if lower_text == phrase or (len(lower_text) < len(phrase) * 2 and lower_text.count(phrase) >= 1 and len(lower_text) <= len(phrase) + 5):
-            # Only flag if it's a standalone hallucination phrase that makes up the whole segment
-            # Don't flag if it appears naturally within longer real text
-            if text_len < len(phrase) * 3:
-                logger.info(f"Known hallucination phrase detected: '{text[:50]}'")
-                return True
+        # Only flag if the phrase IS the whole segment (or nearly)
+        if lower_text == phrase or (len(lower_text) < len(phrase) + 10 and phrase in lower_text):
+            logger.info(f"Known hallucination phrase: '{text[:60]}'")
+            return True
 
     return False
 
 
-def _filter_hallucinated_segments(segments: list) -> list:
+def _filter_hallucinations(segments: list) -> list:
     """
     Post-process segments to remove hallucinated ones.
-    Also removes segments where the same text repeats across multiple consecutive segments.
+    - Removes individually hallucinated segments (repetitive text)
+    - Removes consecutive duplicate segments
+    - Removes all segments if they're all identical (full hallucination)
     """
     if not segments:
         return segments
@@ -159,12 +183,12 @@ def _filter_hallucinated_segments(segments: list) -> list:
     for seg in segments:
         text = seg.text.strip() if hasattr(seg, 'text') else ""
 
-        # Skip if this segment is individually hallucinated
+        # Skip individually hallucinated segments
         if _is_hallucinated_segment(text):
-            logger.info(f"Removing hallucinated segment [{seg.start:.1f}-{seg.end:.1f}]: '{text[:60]}'")
+            logger.info(f"Removing hallucinated segment [{seg.start:.1f}-{seg.end:.1f}]: '{text[:80]}'")
             continue
 
-        # Skip if identical to previous segment (consecutive duplicates)
+        # Skip consecutive duplicates
         if text == prev_text and text:
             logger.info(f"Removing duplicate segment [{seg.start:.1f}-{seg.end:.1f}]: '{text[:60]}'")
             continue
@@ -172,17 +196,17 @@ def _filter_hallucinated_segments(segments: list) -> list:
         filtered.append(seg)
         prev_text = text
 
-    # Final check: if ALL remaining segments have the same text, it's all hallucination
+    # If ALL remaining segments have identical text → full hallucination
     if len(filtered) > 2:
         texts = [s.text.strip() for s in filtered if hasattr(s, 'text')]
         unique_texts = set(texts)
         if len(unique_texts) == 1:
-            logger.warning("All segments have identical text — likely full hallucination, clearing results")
+            logger.warning("All segments have identical text — full hallucination, clearing results")
             return []
 
     removed = len(segments) - len(filtered)
     if removed > 0:
-        logger.info(f"Hallucination filter: removed {removed}/{len(segments)} segments")
+        logger.info(f"Hallucination filter: removed {removed}/{len(segments)} segments, kept {len(filtered)}")
 
     return filtered
 
@@ -196,13 +220,15 @@ def transcribe_audio(
     on_progress: Optional[Callable[[int, str], None]] = None,
 ) -> TranscriptionResult:
     """
-    Transcribe audio using faster-whisper with:
-    - VAD filter to skip silence (prevents hallucination)
+    Transcribe audio using faster-whisper with robust anti-hallucination.
+
+    Features:
+    - VAD filter to skip silence
     - Word-level timestamps
     - Beam search for accuracy
     - condition_on_previous_text=False to prevent repetition loops
-    - Compression ratio & log prob thresholds
-    - Post-processing hallucination filter
+    - Strict compression ratio threshold to reject repetitive output
+    - N-gram frequency hallucination post-filter
     - Audio pre-extraction for reliable input
     """
     if on_progress:
@@ -231,24 +257,24 @@ def transcribe_audio(
         hw_str = ", ".join(hotwords)
         prompt = f"{prompt}. Keywords: {hw_str}" if prompt else f"Keywords: {hw_str}"
 
-    # --- Primary transcription ---
-    logger.info(f"Transcribing with model={model_size.value}, language={language}, VAD=True")
+    # --- Primary transcription with VAD ---
+    logger.info(f"Transcribing: model={model_size.value}, language={language}, VAD=True")
 
     segments_iter, info = model.transcribe(
         actual_audio_path,
         # VAD filter — critical for preventing hallucination on silence
         vad_filter=True,
         vad_parameters={
-            "threshold": 0.40,              # Slightly below default 0.5 for sensitivity
-            "min_silence_duration_ms": 400,  # 400ms silence detection
-            "min_speech_duration_ms": 150,   # Accept speech chunks ≥ 150ms
-            "speech_pad_ms": 150,            # Pad detected speech by 150ms each side
+            "threshold": 0.40,              # Slightly below default 0.5
+            "min_silence_duration_ms": 400,
+            "min_speech_duration_ms": 150,
+            "speech_pad_ms": 150,
         },
-        # Beam search for accuracy
+        # Beam search
         beam_size=5,
         best_of=5,
         temperature=0.0,
-        # IMPORTANT: False prevents "โอเคโอเค..." repetition loops
+        # CRITICAL: False prevents repetition loops ("โอเคโอเค...", "โนโนโน...")
         condition_on_previous_text=False,
         # Context
         initial_prompt=prompt if prompt else None,
@@ -256,10 +282,10 @@ def transcribe_audio(
         language=language,  # None = auto-detect
         # Word timestamps
         word_timestamps=True,
-        # Anti-hallucination thresholds
-        compression_ratio_threshold=2.4,   # Default 2.4 — reject segments with too much repetition
-        log_prob_threshold=-1.0,           # Default -1.0 — reject low-confidence segments
-        no_speech_threshold=0.6,           # Default 0.6 — segments with >60% no-speech prob are skipped
+        # Anti-hallucination thresholds (stricter than defaults)
+        compression_ratio_threshold=1.8,    # Default 2.4 — stricter to catch repetition
+        log_prob_threshold=-0.5,            # Default -1.0 — stricter confidence filter
+        no_speech_threshold=0.5,            # Default 0.6 — more aggressive no-speech detection
     )
 
     detected_language = info.language
@@ -271,14 +297,14 @@ def transcribe_audio(
 
     # Materialize segments
     raw_segments = list(segments_iter)
-    logger.info(f"Raw transcription produced {len(raw_segments)} segments")
+    logger.info(f"Raw transcription: {len(raw_segments)} segments")
 
-    # --- Fallback: if VAD produced 0 segments, try without VAD but keep anti-hallucination ---
+    # --- Fallback if VAD produced 0 segments ---
     if not raw_segments:
         if on_progress:
-            on_progress(40, "No speech found with VAD. Retrying with relaxed settings...")
+            on_progress(40, "No speech with VAD. Retrying with relaxed settings...")
 
-        logger.info("Fallback: VAD=False, condition_on_previous_text=False")
+        logger.info("Fallback: VAD=False, relaxed thresholds")
         segments_iter2, info2 = model.transcribe(
             actual_audio_path,
             vad_filter=False,
@@ -289,24 +315,24 @@ def transcribe_audio(
             initial_prompt=prompt if prompt else None,
             language=language,
             word_timestamps=True,
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
+            compression_ratio_threshold=2.0,
+            log_prob_threshold=-0.8,
             no_speech_threshold=0.6,
         )
         raw_segments = list(segments_iter2)
         if info2:
             detected_language = info2.language or detected_language
             total_duration = info2.duration or total_duration
-        logger.info(f"Fallback produced {len(raw_segments)} segments")
+        logger.info(f"Fallback: {len(raw_segments)} segments")
 
     # --- Post-processing: filter hallucinations ---
     if on_progress:
         on_progress(70, "Filtering hallucinations...")
 
-    clean_segments = _filter_hallucinated_segments(raw_segments)
+    clean_segments = _filter_hallucinations(raw_segments)
     logger.info(f"After hallucination filter: {len(clean_segments)}/{len(raw_segments)} segments kept")
 
-    # Build result segments
+    # Build result
     result_segments: list[TranscriptionSegment] = []
     seg_count = 0
 
@@ -330,7 +356,6 @@ def transcribe_audio(
         ))
         seg_count += 1
 
-        # Update progress proportionally
         if on_progress and total_duration > 0:
             pct = min(95, int(75 + (seg.end / total_duration) * 20))
             on_progress(pct, f"Segment {seg_count}: {seg.text[:40].strip()}...")
@@ -346,11 +371,11 @@ def transcribe_audio(
 
     if on_progress:
         if result_segments:
-            on_progress(100, f"Transcription complete — {len(result_segments)} segments")
+            on_progress(100, f"Done — {len(result_segments)} segments")
         else:
-            on_progress(100, "Transcription complete — no speech detected")
+            on_progress(100, "Done — no speech detected")
 
-    logger.info(f"Final result: {len(result_segments)} segments, language={detected_language}")
+    logger.info(f"Final: {len(result_segments)} segments, lang={detected_language}")
 
     return TranscriptionResult(
         segments=result_segments,
