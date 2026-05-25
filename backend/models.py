@@ -79,7 +79,7 @@ class UploadResponse(BaseModel):
 
 
 class TranscribeRequest(BaseModel):
-    model: WhisperModel = WhisperModel.LARGE_V3
+    model: WhisperModel = WhisperModel.BASE
     language: Optional[str] = None          # null = auto-detect
     initial_prompt: Optional[str] = None    # context hint
     hotwords: list[str] = Field(default_factory=list)  # boost specific words

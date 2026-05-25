@@ -32,11 +32,11 @@ export const FONT_SIZES: { value: FontSize; label: string; px: number }[] = [
 ];
 
 export const WHISPER_MODELS: { value: WhisperModel; label: string; desc: string }[] = [
-  { value: 'tiny', label: 'Tiny', desc: 'Fastest, lower quality' },
-  { value: 'base', label: 'Base', desc: 'Fast, good quality' },
-  { value: 'small', label: 'Small', desc: 'Balanced' },
-  { value: 'medium', label: 'Medium', desc: 'High quality' },
-  { value: 'large-v3', label: 'Large v3', desc: 'Best accuracy (recommended)' },
+  { value: 'tiny', label: 'Tiny', desc: 'Fastest, lower quality (~75MB)' },
+  { value: 'base', label: 'Base', desc: 'Recommended — fast & accurate (~150MB)' },
+  { value: 'small', label: 'Small', desc: 'Better accuracy (~500MB)' },
+  { value: 'medium', label: 'Medium', desc: 'High quality (~1.5GB RAM)' },
+  { value: 'large-v3', label: 'Large v3', desc: 'Best accuracy (~3GB RAM)' },
 ];
 
 export const LANGUAGES: { code: string | null; label: string }[] = [

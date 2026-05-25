@@ -40,7 +40,7 @@ def _get_model(model_name: str) -> FWModel:
 
 def transcribe_audio(
     audio_path: str,
-    model_size: WhisperModel = WhisperModel.LARGE_V3,
+    model_size: WhisperModel = WhisperModel.BASE,
     language: Optional[str] = None,
     initial_prompt: Optional[str] = None,
     hotwords: Optional[list[str]] = None,

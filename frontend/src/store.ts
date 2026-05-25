@@ -59,7 +59,7 @@ export const useStore = create<AppStore>((set, get) => ({
   detectedLanguage: '', setDetectedLanguage: (l) => set({ detectedLanguage: l }),
 
   // Transcription settings — default to large-v3 for best accuracy
-  whisperModel: 'large-v3', setWhisperModel: (model) => set({ whisperModel: model }),
+  whisperModel: 'base', setWhisperModel: (model) => set({ whisperModel: model }),
   transcribeLang: null, setTranscribeLang: (lang) => set({ transcribeLang: lang }),
   initialPrompt: '', setInitialPrompt: (prompt) => set({ initialPrompt: prompt }),
   hotwords: '', setHotwords: (hw) => set({ hotwords: hw }),
@@ -88,7 +88,7 @@ export const useStore = create<AppStore>((set, get) => ({
   reset: () => set({
     step: 1, jobId: null, videoUrl: null, videoFilename: '', videoDuration: 0,
     segments: [], language: 'en', detectedLanguage: '',
-    whisperModel: 'large-v3', transcribeLang: null, initialPrompt: '', hotwords: '',
+    whisperModel: 'base', transcribeLang: null, initialPrompt: '', hotwords: '',
     captionStyle: 'tiktok', fontSize: 'medium', textColor: '#FFFFFF', position: 'bottom',
     transcribeProgress: 0, exportProgress: 0, progressMessage: '', exportedVideoUrl: null,
   }),
