@@ -136,19 +136,19 @@ body {
 .transcript-segment { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid var(--border); }
 .transcript-segment:last-child { border-bottom: none; }
 .segment-time { font-size: 11px; color: var(--accent); font-family: monospace; white-space: nowrap; min-width: 100px; padding-top: 6px; }
-.segment-words { flex: 1; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-.segment-text-plain { color: var(--text-primary); font-size: 14px; }
+.segment-sentence { flex: 1; line-height: 1.8; font-size: 15px; color: var(--text-primary); cursor: pointer; border-radius: 4px; padding: 2px 4px; margin-left: -4px; transition: background 0.15s; }
+.segment-sentence:hover { background: rgba(255, 255, 255, 0.03); }
+.segment-text-plain { color: var(--text-primary); font-size: 15px; }
 
-/* Word chips with confidence color coding */
-.word-chip { display: inline-block; padding: 3px 8px; border-radius: 5px; font-size: 14px; cursor: pointer; transition: all 0.15s; border: 1px solid transparent; }
-.word-chip:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
-.word-chip.conf-high { background: rgba(0, 255, 136, 0.08); color: #b0ffcf; border-color: rgba(0, 255, 136, 0.15); }
-.word-chip.conf-high:hover { background: rgba(0, 255, 136, 0.15); border-color: rgba(0, 255, 136, 0.3); }
-.word-chip.conf-medium { background: rgba(255, 215, 0, 0.1); color: #fff3b0; border-color: rgba(255, 215, 0, 0.2); }
-.word-chip.conf-medium:hover { background: rgba(255, 215, 0, 0.18); border-color: rgba(255, 215, 0, 0.35); }
-.word-chip.conf-low { background: rgba(255, 68, 102, 0.1); color: #ffb0bf; border-color: rgba(255, 68, 102, 0.2); }
-.word-chip.conf-low:hover { background: rgba(255, 68, 102, 0.18); border-color: rgba(255, 68, 102, 0.35); }
-.word-edit-input { padding: 3px 8px; border-radius: 5px; font-size: 14px; font-family: inherit; background: var(--accent); color: #fff; border: 2px solid var(--accent-hover); outline: none; min-width: 40px; max-width: 180px; }
+/* Inline words with confidence underline — reads as a sentence */
+.word-inline { transition: all 0.15s; border-bottom: 2px solid transparent; border-radius: 2px; padding: 1px 0; }
+.word-inline:hover { background: rgba(124, 92, 255, 0.15); border-radius: 4px; padding: 1px 2px; margin: 0 -2px; }
+.word-inline.conf-high { border-bottom-color: rgba(0, 255, 136, 0.35); }
+.word-inline.conf-medium { border-bottom-color: rgba(255, 215, 0, 0.5); }
+.word-inline.conf-low { border-bottom-color: rgba(255, 68, 102, 0.6); color: #ffb0bf; }
+
+.sentence-edit-input { width: 100%; padding: 4px 8px; border-radius: 6px; font-size: 15px; font-family: inherit; background: var(--bg-input); color: #fff; border: 2px solid var(--accent); outline: none; }
+.sentence-edit-input:focus { border-color: var(--accent-hover); box-shadow: 0 0 0 2px var(--accent-glow); }
 
 
 /* Style step */

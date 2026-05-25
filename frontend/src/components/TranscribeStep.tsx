@@ -18,7 +18,7 @@ export function TranscribeStep() {
     transcribeLang, setTranscribeLang,
     initialPrompt, setInitialPrompt,
     hotwords, setHotwords,
-    updateWord, addToast,
+    updateSegmentText, addToast,
     transcribeProgress, setTranscribeProgress,
     progressMessage, setProgressMessage,
   } = useStore();
@@ -26,17 +26,17 @@ export function TranscribeStep() {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [hasTranscribed, setHasTranscribed] = useState(segments.length > 0);
   const [showSettings, setShowSettings] = useState(true);
-  const [editingWord, setEditingWord] = useState<{ segId: number; wordIdx: number } | null>(null);
+  const [editingSegment, setEditingSegment] = useState<number | null>(null);
   const [editValue, setEditValue] = useState('');
   const editRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<ProgressWebSocket | null>(null);
 
   useEffect(() => () => { wsRef.current?.disconnect(); }, []);
 
-  // Focus the edit input when a word is clicked
+  // Focus the edit input when a sentence is clicked
   useEffect(() => {
-    if (editingWord && editRef.current) editRef.current.focus();
-  }, [editingWord]);
+    if (editingSegment !== null && editRef.current) editRef.current.focus();
+  }, [editingSegment]);
 
   const start = useCallback(async () => {
     if (!jobId) return;
@@ -71,16 +71,16 @@ export function TranscribeStep() {
     }
   }, [jobId, whisperModel, transcribeLang, initialPrompt, hotwords, setSegments, setLanguage, setDetectedLanguage, setTranscribeProgress, setProgressMessage, addToast]);
 
-  const handleWordClick = (segId: number, wordIdx: number, word: string) => {
-    setEditingWord({ segId, wordIdx });
-    setEditValue(word);
+  const handleSentenceClick = (segId: number, text: string) => {
+    setEditingSegment(segId);
+    setEditValue(text);
   };
 
   const commitEdit = () => {
-    if (editingWord && editValue.trim()) {
-      updateWord(editingWord.segId, editingWord.wordIdx, editValue.trim());
+    if (editingSegment !== null && editValue.trim()) {
+      updateSegmentText(editingSegment, editValue.trim());
     }
-    setEditingWord(null);
+    setEditingSegment(null);
     setEditValue('');
   };
 
@@ -189,38 +189,36 @@ export function TranscribeStep() {
             </div>
           </div>
 
-          {segments.map((seg) => (
-            <div className="transcript-segment" key={seg.id}>
-              <span className="segment-time">{fmt(seg.start)} – {fmt(seg.end)}</span>
-              <div className="segment-words">
-                {seg.words.length > 0 ? seg.words.map((w, i) => {
-                  const isEditing = editingWord?.segId === seg.id && editingWord?.wordIdx === i;
-                  return isEditing ? (
+          {segments.map((seg) => {
+            const isEditing = editingSegment === seg.id;
+            return (
+              <div className="transcript-segment" key={seg.id}>
+                <span className="segment-time">{fmt(seg.start)} – {fmt(seg.end)}</span>
+                <div className="segment-sentence" onClick={() => !isEditing && handleSentenceClick(seg.id, seg.text)}>
+                  {isEditing ? (
                     <input
-                      key={`edit-${i}`}
                       ref={editRef}
-                      className="word-edit-input"
+                      className="sentence-edit-input"
                       value={editValue}
                       onChange={(e) => setEditValue(e.target.value)}
                       onBlur={commitEdit}
-                      onKeyDown={(e) => { if (e.key === 'Enter') commitEdit(); if (e.key === 'Escape') { setEditingWord(null); setEditValue(''); } }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') commitEdit(); if (e.key === 'Escape') { setEditingSegment(null); setEditValue(''); } }}
                     />
                   ) : (
-                    <span
-                      key={i}
-                      className={`word-chip ${confidenceClass(w.confidence)}`}
-                      title={`"${w.word}" — confidence: ${(w.confidence * 100).toFixed(0)}% — click to edit`}
-                      onClick={() => handleWordClick(seg.id, i, w.word)}
-                    >
-                      {w.word}
-                    </span>
-                  );
-                }) : (
-                  <span className="segment-text-plain">{seg.text}</span>
-                )}
+                    seg.words.length > 0 ? seg.words.map((w, i) => (
+                      <span
+                        key={i}
+                        className={`word-inline ${confidenceClass(w.confidence)}`}
+                        title={`confidence: ${(w.confidence * 100).toFixed(0)}% — click sentence to edit`}
+                      >{w.word}</span>
+                    )) : (
+                      <span className="segment-text-plain">{seg.text}</span>
+                    )
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 

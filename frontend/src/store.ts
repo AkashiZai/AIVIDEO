@@ -45,7 +45,19 @@ export const useStore = create<AppStore>((set, get) => ({
   videoDuration: 0, setVideoDuration: (d) => set({ videoDuration: d }),
   segments: [], setSegments: (segs) => set({ segments: segs }),
   updateSegmentText: (id, text) => set((s) => ({
-    segments: s.segments.map((seg) => seg.id === id ? { ...seg, text } : seg),
+    segments: s.segments.map((seg) => {
+      if (seg.id !== id) return seg;
+      const newWordsText = text.trim().split(/\s+/).filter(Boolean);
+      const duration = seg.end - seg.start;
+      const timePerWord = duration / Math.max(1, newWordsText.length);
+      const newWords = newWordsText.map((w, i) => ({
+        word: w,
+        start: seg.start + (i * timePerWord),
+        end: seg.start + ((i + 1) * timePerWord),
+        confidence: 1.0
+      }));
+      return { ...seg, text, words: newWords };
+    }),
   })),
   updateWord: (segId, wordIdx, newWord) => set((s) => ({
     segments: s.segments.map((seg) => {
