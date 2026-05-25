@@ -222,6 +222,17 @@ export function TranscribeStep() {
         </div>
       )}
 
+      {hasTranscribed && segments.length === 0 && (
+        <div className="loading-center">
+          <div className="upload-icon">🔇</div>
+          <p className="loading-text" style={{ fontSize: '16px', color: 'var(--text-primary)' }}>No speech was detected in this video.</p>
+          <p className="loading-text">This could mean the video has no audio, or the speech is too quiet/unclear.</p>
+          <button className="btn btn-secondary" onClick={() => { setHasTranscribed(false); setShowSettings(true); }} style={{ marginTop: '16px' }}>
+            Try Again with Different Settings
+          </button>
+        </div>
+      )}
+
       {/* Navigation */}
       <div className="step-nav">
         <button className="btn btn-ghost" onClick={() => setStep(1)}>← Back</button>
