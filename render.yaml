@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: captionforge-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: WHISPER_MODEL
+        value: base
+    autoDeploy: true
