@@ -1,7 +1,13 @@
 import type { UploadResponse, TranscribeResponse, ExportResponse, TranscriptionSegment, CaptionConfig, WhisperModel, WSProgressMessage } from './types';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-const WS_BASE = API_BASE.replace(/^http/, 'ws');
+// In dev, route through Vite proxy (/api) to bypass CORS.
+// In production builds, use the full VITE_API_URL.
+const API_BASE = import.meta.env.VITE_API_URL
+  ? import.meta.env.VITE_API_URL
+  : '/api';
+const WS_BASE = import.meta.env.VITE_API_URL
+  ? import.meta.env.VITE_API_URL.replace(/^http/, 'ws')
+  : `ws://${window.location.host}/api`;
 
 export async function uploadVideo(file: File): Promise<UploadResponse> {
   const form = new FormData(); form.append('file', file);
