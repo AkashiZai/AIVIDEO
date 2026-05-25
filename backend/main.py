@@ -1,10 +1,6 @@
 """
 AI Auto-Caption Video Editor — FastAPI Backend
-
-Railway/Render/Fly deployment ready:
-- Reads PORT from environment variable
-- /health endpoint returns 200 immediately (no heavy imports)
-- CORS allows all origins for frontend on different domain
+Uses faster-whisper (CTranslate2) for 5x faster transcription.
 """
 from __future__ import annotations
 import asyncio, os
@@ -20,29 +16,23 @@ from job_manager import job_manager
 from ffmpeg_service import get_video_duration
 
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
 
-app = FastAPI(title="AI Auto-Caption Video Editor", version="1.0.0", lifespan=lifespan)
-
+app = FastAPI(title="CaptionForge AI", version="2.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
 
 # ---------------------------------------------------------------------------
-# Health check — MUST return 200 quickly for Railway healthcheck
+# Health
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
 @app.get("/")
 async def health():
-    """Returns 200 immediately. Railway checks this to confirm the app started."""
-    return {"status": "ok", "service": "captionforge-api"}
+    return {"status": "ok", "service": "captionforge-api", "whisper": "faster-whisper"}
 
 
 # ---------------------------------------------------------------------------
@@ -52,12 +42,12 @@ async def health():
 @app.post("/upload", response_model=UploadResponse)
 async def upload_video(file: UploadFile = File(...)):
     if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
+        raise HTTPException(400, "No file provided")
 
-    allowed = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".mp3", ".wav", ".flac"}
+    allowed = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".mp3", ".wav", ".flac", ".m4a", ".ogg"}
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in allowed:
-        raise HTTPException(status_code=400, detail=f"Unsupported: {ext}")
+        raise HTTPException(400, f"Unsupported: {ext}")
 
     job = job_manager.create_job()
     job.original_filename = file.filename
@@ -66,7 +56,7 @@ async def upload_video(file: UploadFile = File(...)):
     content = await file.read()
     if len(content) / (1024*1024) > max_mb:
         job_manager.delete_job(job.job_id)
-        raise HTTPException(status_code=413, detail=f"File too large. Max {max_mb}MB.")
+        raise HTTPException(413, f"File too large. Max {max_mb}MB.")
 
     input_path = os.path.join(job.job_dir, f"input{ext}")
     with open(input_path, "wb") as f:
@@ -85,6 +75,10 @@ async def upload_video(file: UploadFile = File(...)):
 
 @app.post("/transcribe/{job_id}", response_model=TranscribeResponse)
 async def transcribe_video(job_id: str, request: TranscribeRequest = TranscribeRequest()):
+    """
+    Transcribe with faster-whisper.
+    Accepts: model, language, initial_prompt, hotwords
+    """
     job = job_manager.get_job(job_id)
     if not job: raise HTTPException(404, "Job not found")
     if not job.input_path or not os.path.exists(job.input_path):
@@ -94,12 +88,23 @@ async def transcribe_video(job_id: str, request: TranscribeRequest = TranscribeR
 
     try:
         loop = asyncio.get_event_loop()
+
         def sync_transcribe():
-            # Lazy import — whisper + torch are heavy, only load when needed
             from whisper_service import transcribe_audio
-            def on_progress(pct, msg):
-                asyncio.run_coroutine_threadsafe(job_manager.update_progress(job_id, pct, msg), loop)
-            return transcribe_audio(job.input_path, model_size=request.model, on_progress=on_progress)
+
+            def on_progress(pct: int, msg: str):
+                asyncio.run_coroutine_threadsafe(
+                    job_manager.update_progress(job_id, pct, msg), loop
+                )
+
+            return transcribe_audio(
+                job.input_path,
+                model_size=request.model,
+                language=request.language,
+                initial_prompt=request.initial_prompt,
+                hotwords=request.hotwords if request.hotwords else None,
+                on_progress=on_progress,
+            )
 
         result = await loop.run_in_executor(None, sync_transcribe)
         job.transcription = result
@@ -107,7 +112,12 @@ async def transcribe_video(job_id: str, request: TranscribeRequest = TranscribeR
         job.duration = result.duration
         await job_manager.update_status(job_id, JobStatus.TRANSCRIBED, 100, "Done")
 
-        return TranscribeResponse(job_id=job_id, segments=result.segments, language=result.language, duration=result.duration)
+        return TranscribeResponse(
+            job_id=job_id,
+            segments=result.segments,
+            language=result.language,
+            duration=result.duration,
+        )
     except Exception as e:
         await job_manager.update_status(job_id, JobStatus.ERROR, 0, "Failed", str(e))
         raise HTTPException(500, f"Transcription failed: {e}")
@@ -162,10 +172,8 @@ async def get_status(job_id: str):
 async def download_video(job_id: str):
     job = job_manager.get_job(job_id)
     if not job: raise HTTPException(404, "Job not found")
-    if job.status != JobStatus.COMPLETED or not job.output_path:
-        raise HTTPException(400, "Not ready")
-    if not os.path.exists(job.output_path):
-        raise HTTPException(404, "File not found")
+    if job.status != JobStatus.COMPLETED or not job.output_path: raise HTTPException(400, "Not ready")
+    if not os.path.exists(job.output_path): raise HTTPException(404, "File not found")
     base = os.path.splitext(job.original_filename)[0]
     return FileResponse(job.output_path, media_type="video/mp4", filename=f"{base}_captioned.mp4")
 
@@ -173,8 +181,7 @@ async def download_video(job_id: str):
 async def serve_video(job_id: str):
     job = job_manager.get_job(job_id)
     if not job: raise HTTPException(404, "Job not found")
-    if not job.input_path or not os.path.exists(job.input_path):
-        raise HTTPException(404, "Video not found")
+    if not job.input_path or not os.path.exists(job.input_path): raise HTTPException(404, "Video not found")
     return FileResponse(job.input_path, media_type="video/mp4")
 
 
@@ -190,10 +197,8 @@ async def ws_endpoint(websocket: WebSocket, job_id: str):
         await websocket.send_json({"type": "error", "message": "Job not found"})
         await websocket.close()
         return
-
     job_manager.register_ws(job_id, websocket)
     await websocket.send_json({"type": "status", "job_id": job_id, "status": job.status.value, "progress": job.progress, "message": job.message})
-
     try:
         while True:
             data = await websocket.receive_text()

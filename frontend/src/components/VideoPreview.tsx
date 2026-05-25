@@ -1,112 +1,31 @@
-// ===========================================================================
-// VideoPreview — HTML5 video player with custom controls
-// ===========================================================================
+import { useRef, useState, useCallback, forwardRef, useImperativeHandle, useEffect } from 'react';
 
-import { useRef, useState, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
+interface Props { src: string; showControls?: boolean; onTimeUpdate?: (t: number) => void; }
+export interface VideoPreviewHandle { getCurrentTime: () => number; getDuration: () => number; }
 
-interface VideoPreviewProps {
-  src: string;
-  showControls?: boolean;
-  onTimeUpdate?: (time: number) => void;
-}
+export const VideoPreview = forwardRef<VideoPreviewHandle, Props>(({ src, showControls = true, onTimeUpdate }, ref) => {
+  const vRef = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [time, setTime] = useState(0);
+  const [dur, setDur] = useState(0);
 
-export interface VideoPreviewHandle {
-  getCurrentTime: () => number;
-  getDuration: () => number;
-}
+  useImperativeHandle(ref, () => ({ getCurrentTime: () => vRef.current?.currentTime ?? 0, getDuration: () => vRef.current?.duration ?? 0 }));
+  const toggle = useCallback(() => { const v = vRef.current; if (!v) return; v.paused ? v.play() : v.pause(); setPlaying(!v.paused); }, []);
+  useEffect(() => { setPlaying(false); setTime(0); }, [src]);
+  const fmt = (s: number) => `${Math.floor(s/60)}:${Math.floor(s%60).toString().padStart(2,'0')}`;
 
-export const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(
-  ({ src, showControls = true, onTimeUpdate }, ref) => {
-    const videoRef = useRef<HTMLVideoElement>(null);
-    const [isPlaying, setIsPlaying] = useState(false);
-    const [currentTime, setCurrentTime] = useState(0);
-    const [duration, setDuration] = useState(0);
-
-    useImperativeHandle(ref, () => ({
-      getCurrentTime: () => videoRef.current?.currentTime ?? 0,
-      getDuration: () => videoRef.current?.duration ?? 0,
-    }));
-
-    const togglePlay = useCallback(() => {
-      const v = videoRef.current;
-      if (!v) return;
-      if (v.paused) {
-        v.play();
-        setIsPlaying(true);
-      } else {
-        v.pause();
-        setIsPlaying(false);
-      }
-    }, []);
-
-    const handleTimeUpdate = useCallback(() => {
-      const v = videoRef.current;
-      if (!v) return;
-      setCurrentTime(v.currentTime);
-      onTimeUpdate?.(v.currentTime);
-    }, [onTimeUpdate]);
-
-    const handleLoadedMetadata = useCallback(() => {
-      if (videoRef.current) {
-        setDuration(videoRef.current.duration);
-      }
-    }, []);
-
-    const handleScrub = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-      const t = parseFloat(e.target.value);
-      if (videoRef.current) {
-        videoRef.current.currentTime = t;
-        setCurrentTime(t);
-      }
-    }, []);
-
-    useEffect(() => {
-      setIsPlaying(false);
-      setCurrentTime(0);
-    }, [src]);
-
-    const formatTime = (s: number) => {
-      const m = Math.floor(s / 60);
-      const sec = Math.floor(s % 60);
-      return `${m}:${sec.toString().padStart(2, '0')}`;
-    };
-
-    return (
-      <div className="video-preview-container" id="video-preview">
-        <video
-          ref={videoRef}
-          src={src}
-          className="video-element"
-          onTimeUpdate={handleTimeUpdate}
-          onLoadedMetadata={handleLoadedMetadata}
-          onPlay={() => setIsPlaying(true)}
-          onPause={() => setIsPlaying(false)}
-          onEnded={() => setIsPlaying(false)}
-          playsInline
-        />
-        {showControls && (
-          <div className="video-controls">
-            <button className="btn btn-icon btn-ghost" onClick={togglePlay} id="btn-play-pause">
-              {isPlaying ? '⏸' : '▶'}
-            </button>
-            <span className="video-time">
-              {formatTime(currentTime)} / {formatTime(duration)}
-            </span>
-            <input
-              type="range"
-              className="video-scrubber"
-              min={0}
-              max={duration || 1}
-              step={0.1}
-              value={currentTime}
-              onChange={handleScrub}
-              id="video-scrubber"
-            />
-          </div>
-        )}
-      </div>
-    );
-  },
-);
-
+  return (
+    <div className="video-preview-container">
+      <video ref={vRef} src={src} className="video-element" playsInline
+        onTimeUpdate={() => { const t = vRef.current?.currentTime ?? 0; setTime(t); onTimeUpdate?.(t); }}
+        onLoadedMetadata={() => setDur(vRef.current?.duration ?? 0)}
+        onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)}/>
+      {showControls && <div className="video-controls">
+        <button className="btn btn-icon btn-ghost" onClick={toggle}>{playing ? '⏸' : '▶'}</button>
+        <span className="video-time">{fmt(time)} / {fmt(dur)}</span>
+        <input type="range" className="video-scrubber" min={0} max={dur||1} step={0.1} value={time} onChange={(e)=>{const t=parseFloat(e.target.value);if(vRef.current)vRef.current.currentTime=t;setTime(t)}}/>
+      </div>}
+    </div>
+  );
+});
 VideoPreview.displayName = 'VideoPreview';

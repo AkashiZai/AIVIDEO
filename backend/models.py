@@ -1,7 +1,6 @@
 """
 Pydantic models for the AI Auto-Caption Video Editor API.
 """
-
 from __future__ import annotations
 from enum import Enum
 from typing import Optional
@@ -37,9 +36,11 @@ class CaptionPosition(str, Enum):
 
 
 class WhisperModel(str, Enum):
+    TINY = "tiny"
     BASE = "base"
     SMALL = "small"
     MEDIUM = "medium"
+    LARGE_V3 = "large-v3"
 
 
 class WordTimestamp(BaseModel):
@@ -78,7 +79,10 @@ class UploadResponse(BaseModel):
 
 
 class TranscribeRequest(BaseModel):
-    model: WhisperModel = WhisperModel.BASE
+    model: WhisperModel = WhisperModel.LARGE_V3
+    language: Optional[str] = None          # null = auto-detect
+    initial_prompt: Optional[str] = None    # context hint
+    hotwords: list[str] = Field(default_factory=list)  # boost specific words
 
 
 class TranscribeResponse(BaseModel):

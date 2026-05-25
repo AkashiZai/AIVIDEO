@@ -1,46 +1,21 @@
-// ===========================================================================
-// TypeScript types for the AI Auto-Caption Video Editor frontend
-// ===========================================================================
-
-// ---------------------------------------------------------------------------
-// Caption & Transcription Types
-// ---------------------------------------------------------------------------
-
-export interface WordTimestamp {
-  word: string;
-  start: number;
-  end: number;
-  confidence: number;
-}
-
-export interface TranscriptionSegment {
-  id: number;
-  text: string;
-  start: number;
-  end: number;
-  words: WordTimestamp[];
-}
-
-export interface TranscriptionResult {
-  segments: TranscriptionSegment[];
-  language: string;
-  duration: number;
-}
-
-// ---------------------------------------------------------------------------
-// Caption Styling
-// ---------------------------------------------------------------------------
+export interface WordTimestamp { word: string; start: number; end: number; confidence: number; }
+export interface TranscriptionSegment { id: number; text: string; start: number; end: number; words: WordTimestamp[]; }
+export interface TranscriptionResult { segments: TranscriptionSegment[]; language: string; duration: number; }
 
 export type CaptionStyleType = 'tiktok' | 'subtitle' | 'word_by_word' | 'karaoke';
 export type FontSize = 'small' | 'medium' | 'large';
 export type CaptionPosition = 'top' | 'center' | 'bottom';
-export type WhisperModel = 'base' | 'small' | 'medium';
+export type WhisperModel = 'tiny' | 'base' | 'small' | 'medium' | 'large-v3';
+export type AppStep = 1 | 2 | 3 | 4;
+export type ToastType = 'success' | 'error' | 'warning' | 'info';
 
-export interface CaptionConfig {
-  style: CaptionStyleType;
-  font_size: FontSize;
-  text_color: string;
-  position: CaptionPosition;
+export interface CaptionConfig { style: CaptionStyleType; font_size: FontSize; text_color: string; position: CaptionPosition; }
+
+export interface TranscribeSettings {
+  model: WhisperModel;
+  language: string | null;     // null = auto-detect
+  initial_prompt: string;      // context hint
+  hotwords: string;            // comma-separated
 }
 
 export const CAPTION_STYLES: { value: CaptionStyleType; label: string; description: string; icon: string }[] = [
@@ -56,73 +31,36 @@ export const FONT_SIZES: { value: FontSize; label: string; px: number }[] = [
   { value: 'large', label: 'Large', px: 60 },
 ];
 
-// ---------------------------------------------------------------------------
-// Job & API Types
-// ---------------------------------------------------------------------------
+export const WHISPER_MODELS: { value: WhisperModel; label: string; desc: string }[] = [
+  { value: 'tiny', label: 'Tiny', desc: 'Fastest, lower quality' },
+  { value: 'base', label: 'Base', desc: 'Fast, good quality' },
+  { value: 'small', label: 'Small', desc: 'Balanced' },
+  { value: 'medium', label: 'Medium', desc: 'High quality' },
+  { value: 'large-v3', label: 'Large v3', desc: 'Best accuracy (recommended)' },
+];
 
-export type JobStatus =
-  | 'pending'
-  | 'transcribing'
-  | 'transcribed'
-  | 'exporting'
-  | 'completed'
-  | 'error';
+export const LANGUAGES: { code: string | null; label: string }[] = [
+  { code: null, label: '🌍 Auto-detect' },
+  { code: 'en', label: '🇬🇧 English' },
+  { code: 'th', label: '🇹🇭 Thai' },
+  { code: 'ja', label: '🇯🇵 Japanese' },
+  { code: 'ko', label: '🇰🇷 Korean' },
+  { code: 'zh', label: '🇨🇳 Chinese' },
+  { code: 'es', label: '🇪🇸 Spanish' },
+  { code: 'fr', label: '🇫🇷 French' },
+  { code: 'de', label: '🇩🇪 German' },
+  { code: 'pt', label: '🇧🇷 Portuguese' },
+  { code: 'ru', label: '🇷🇺 Russian' },
+  { code: 'ar', label: '🇸🇦 Arabic' },
+  { code: 'hi', label: '🇮🇳 Hindi' },
+  { code: 'id', label: '🇮🇩 Indonesian' },
+  { code: 'vi', label: '🇻🇳 Vietnamese' },
+];
 
-export interface UploadResponse {
-  job_id: string;
-  filename: string;
-  duration: number;
-  message: string;
-}
+export interface Toast { id: string; message: string; type: ToastType; }
 
-export interface StatusResponse {
-  job_id: string;
-  status: JobStatus;
-  progress: number;
-  message: string;
-  download_url: string | null;
-  error: string | null;
-}
-
-export interface TranscribeResponse {
-  job_id: string;
-  segments: TranscriptionSegment[];
-  language: string;
-  duration: number;
-}
-
-export interface ExportResponse {
-  job_id: string;
-  message: string;
-}
-
-// ---------------------------------------------------------------------------
-// WebSocket Messages
-// ---------------------------------------------------------------------------
-
-export interface WSProgressMessage {
-  type: 'progress' | 'status' | 'error' | 'pong';
-  job_id?: string;
-  status?: string;
-  progress?: number;
-  message?: string;
-  error?: string;
-}
-
-// ---------------------------------------------------------------------------
-// App Step
-// ---------------------------------------------------------------------------
-
-export type AppStep = 1 | 2 | 3 | 4;
-
-// ---------------------------------------------------------------------------
-// Toast
-// ---------------------------------------------------------------------------
-
-export type ToastType = 'success' | 'error' | 'warning' | 'info';
-
-export interface Toast {
-  id: string;
-  message: string;
-  type: ToastType;
-}
+export interface UploadResponse { job_id: string; filename: string; duration: number; message: string; }
+export interface StatusResponse { job_id: string; status: string; progress: number; message: string; download_url: string | null; error: string | null; }
+export interface TranscribeResponse { job_id: string; segments: TranscriptionSegment[]; language: string; duration: number; }
+export interface ExportResponse { job_id: string; message: string; }
+export interface WSProgressMessage { type: 'progress' | 'status' | 'error' | 'pong'; job_id?: string; status?: string; progress?: number; message?: string; error?: string; }
