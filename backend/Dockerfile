@@ -19,9 +19,12 @@ WORKDIR /app
 # Copy requirements first for Docker layer caching
 COPY requirements.txt .
 
-# Pin setuptools FIRST to keep pkg_resources (needed by openai-whisper's setup.py)
-# Then install all Python dependencies
+# 1) Install build tools with pinned setuptools (keeps pkg_resources)
+# 2) Install openai-whisper FIRST with --no-build-isolation
+#    so it uses OUR setuptools, not a fresh isolated one
+# 3) Install remaining deps normally
 RUN pip install --no-cache-dir "setuptools<81" wheel && \
+    pip install --no-cache-dir --no-build-isolation openai-whisper==20240930 && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
