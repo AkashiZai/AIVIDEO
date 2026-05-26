@@ -79,40 +79,59 @@ def _get_model(model_name: str) -> FWModel:
 def _extract_audio_wav(input_path: str) -> Optional[str]:
     """
     Extract audio from video to a temporary WAV file using ffmpeg.
-    Converts to 16kHz mono PCM — the optimal input format for Whisper.
+    Tries multiple codec strategies for compatibility with different ffmpeg builds.
     Returns the path to the extracted WAV file, or None if extraction fails.
     """
-    try:
-        input_dir = os.path.dirname(input_path)
-        audio_path = os.path.join(input_dir, "_extracted_audio.wav")
+    input_dir = os.path.dirname(input_path)
+    audio_path = os.path.join(input_dir, "_extracted_audio.wav")
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", input_path,
-            "-vn",                    # No video
-            "-acodec", "pcm_s16le",   # 16-bit PCM WAV
-            "-ar", "16000",           # 16kHz (optimal for Whisper)
-            "-ac", "1",               # Mono
+    # Multiple strategies — some ffmpeg builds don't have all codecs
+    strategies = [
+        # Strategy 1: Standard PCM WAV (best for Whisper)
+        [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
             audio_path,
-        ]
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120
-        )
-        if result.returncode == 0 and os.path.exists(audio_path):
-            file_size = os.path.getsize(audio_path)
-            logger.info(f"Extracted audio: {audio_path} ({file_size} bytes)")
-            if file_size > 1000:
-                return audio_path
+        ],
+        # Strategy 2: Let ffmpeg auto-select codec for WAV container
+        [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vn", "-ar", "16000", "-ac", "1",
+            audio_path,
+        ],
+        # Strategy 3: Use FLAC (lossless, widely supported)
+        [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vn", "-acodec", "flac", "-ar", "16000", "-ac", "1",
+            audio_path.replace(".wav", ".flac"),
+        ],
+    ]
+
+    for i, cmd in enumerate(strategies):
+        try:
+            target = cmd[-1]  # output path
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0 and os.path.exists(target):
+                file_size = os.path.getsize(target)
+                if file_size > 1000:
+                    logger.info(
+                        f"Audio extracted (strategy {i+1}): {target} "
+                        f"({file_size} bytes)"
+                    )
+                    return target
+                else:
+                    logger.warning(f"Strategy {i+1}: file too small ({file_size}b)")
+                    os.remove(target)
             else:
-                logger.warning("Extracted audio file too small — likely no audio track")
-                os.remove(audio_path)
-                return None
-        else:
-            logger.warning(f"ffmpeg audio extraction failed: {result.stderr[-300:]}")
-            return None
-    except Exception as e:
-        logger.warning(f"Audio extraction error: {e}")
-        return None
+                stderr_tail = result.stderr[-200:] if result.stderr else "no stderr"
+                logger.info(f"Strategy {i+1} failed: {stderr_tail}")
+        except Exception as e:
+            logger.info(f"Strategy {i+1} error: {e}")
+
+    logger.warning("All ffmpeg strategies failed — Whisper will use video directly")
+    return None
 
 
 def _is_hallucinated_segment(text: str) -> bool:

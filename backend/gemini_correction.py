@@ -1,10 +1,11 @@
 """
-Gemini AI Post-Correction Service for Thai transcription.
+Gemini AI Post-Correction Service for Thai song transcription.
 
 After Whisper transcribes audio, this service sends the raw Thai text
 to Google Gemini to correct common Thai spelling/consonant errors.
-This is especially effective for Thai songs where Whisper frequently
-confuses similar-sounding consonants (ช/ซ/ส, ก/ค, etc.).
+
+KEY FEATURE: Gemini tries to IDENTIFY the song first, then corrects
+based on actual known lyrics — far more accurate than rule-based fixes.
 
 Requires: GEMINI_API_KEY environment variable.
 """
@@ -13,96 +14,74 @@ import json
 import logging
 import os
 import re
-from typing import Optional
+import time
+from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Gemini API endpoint
-_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+# Gemini API endpoint — using gemini-2.5-flash for best quality
+_GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    "gemini-2.5-flash:generateContent"
+)
 
 _CORRECTION_PROMPT = """\
-คุณเป็นผู้เชี่ยวชาญภาษาไทยและเนื้อเพลงไทย คุณจะได้รับเนื้อเพลงไทยที่ถอดมาจาก AI (Whisper) ซึ่งมีข้อผิดพลาดเรื่องการสะกดคำ โดยเฉพาะ:
-- พยัญชนะสับสน: ช↔ซ, ส↔ซ, ก↔ค, ท↔ต, พ↔ฟ เป็นต้น
-- สระผิด: เช่น สระอา↔สระอะ, ไอ↔ใอ
-- วรรณยุกต์ผิด: เช่น ไม่มีไม้เอก/โท หรือมีเกิน
-- คำหาย: เช่น "กว่า" กลายเป็น "ว่า" (หาย ก)
-- คำติดกัน: เช่น "ชอกช้ำ" กลายเป็น "ชอบทำ"
+คุณเป็นผู้เชี่ยวชาญเนื้อเพลงไทย มีความรู้เพลงไทยทุกยุคทุกสมัย
 
-กฎ:
-1. แก้ไขเฉพาะการสะกดคำที่ผิดเท่านั้น ไม่เพิ่มหรือลดจำนวนบรรทัด
-2. คงจำนวนบรรทัดเท่าเดิม (สำคัญมาก!)
-3. ไม่เปลี่ยนความหมายโดยรวม
-4. ถ้าไม่แน่ใจ ให้คงคำเดิมไว้
-5. ตอบเฉพาะเนื้อเพลงที่แก้แล้ว บรรทัดต่อบรรทัด ไม่ต้องมีคำอธิบาย
-6. ตอบในรูปแบบ JSON array ของ strings เท่านั้น เช่น ["บรรทัด1", "บรรทัด2"]
+## งานของคุณ
+คุณจะได้รับเนื้อเพลงไทยที่ถอดมาจาก AI (Whisper) ซึ่งมีข้อผิดพลาดมาก โดยเฉพาะ:
+- พยัญชนะสับสน: ช↔ซ↔ส, ก↔ค, ท↔ต, พ↔ฟ, กร→ร (กว่า→ว่า)
+- ทั้งวลีผิด: เช่น "ชอกช้ำ" ถูกถอดเป็น "ชอบทำ", "หลอกลวง" เป็น "ลองรวม"
+- เนื้อเพลงผิดทั้งประโยค (Whisper ได้ยินคำอื่น)
+- คำเกินจากช่วงดนตรี (hallucination)
+- วรรณยุกต์ผิด: ไม้เอก/โท หาย หรือเกิน
+- คำติดกัน/แยกผิด: "ทำนอง"→"ท้อง", "เจ้ากรรม"→"เจ้ากลับ"
 
-เนื้อเพลงที่ต้องแก้ (แต่ละบรรทัดคือ 1 segment):
+## ขั้นตอน
+1. **ระบุเพลง**: พยายามระบุชื่อเพลงและศิลปินจากเนื้อเพลงที่ถอดมา
+2. **ถ้าระบุได้**: แก้เนื้อเพลงให้ตรงกับเนื้อเพลงจริงของเพลงนั้น
+3. **ถ้าระบุไม่ได้**: แก้ตามหลักภาษาไทยและบริบทของเพลง
+
+## กฎสำคัญ
+1. จำนวนบรรทัดต้องเท่าเดิม (สำคัญมาก!)
+2. ถ้าบรรทัดเป็นดนตรี/เงียบ (ข้อความสั้นมากหรือไม่ใช่เนื้อเพลง) ให้คงเดิม
+3. ตอบเป็น JSON object เท่านั้น ในรูปแบบ:
+{"song": "ชื่อเพลง (ถ้าระบุได้)", "artist": "ศิลปิน (ถ้าระบุได้)", "corrected": ["บรรทัด1", "บรรทัด2", ...]}
+
+## เนื้อเพลงที่ต้องแก้:
 """
+
+# Retry settings
+_MAX_RETRIES = 3
+_RETRY_DELAYS = [2, 5, 10]  # seconds
+_CHUNK_SIZE = 15  # Max segments per Gemini call
 
 
 def is_available() -> bool:
     """Check if Gemini API key is configured."""
-    return bool(GEMINI_API_KEY)
+    return bool(GEMINI_API_KEY) and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY_HERE"
 
 
-async def correct_thai_transcription(
-    segment_texts: list[str],
-    on_progress: Optional[callable] = None,
-) -> list[str]:
-    """
-    Send Thai transcription segments to Gemini for spelling correction.
-    
-    Args:
-        segment_texts: List of segment text strings from Whisper.
-        on_progress: Optional callback (pct, message).
-    
-    Returns:
-        List of corrected text strings, same length as input.
-        If correction fails, returns the original texts.
-    """
-    if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not set — skipping AI correction")
-        return segment_texts
-
-    if not segment_texts:
-        return segment_texts
-
+def _call_gemini(prompt: str, retry_count: int = 0) -> dict | None:
+    """Call Gemini API with retry logic for rate limits."""
     import urllib.request
     import urllib.error
 
-    # Build the prompt with numbered lines for clarity
-    numbered_lines = "\n".join(
-        f"{i+1}. {text}" for i, text in enumerate(segment_texts)
-    )
-    full_prompt = _CORRECTION_PROMPT + numbered_lines
-
-    # Build Gemini API request
     request_body = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": full_prompt}
-                ]
-            }
-        ],
+        "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "temperature": 0.1,  # Low temperature for precise corrections
+            "temperature": 0.1,
             "topP": 0.8,
             "maxOutputTokens": 8192,
             "responseMimeType": "application/json",
-        }
+        },
     }
 
     url = f"{_GEMINI_URL}?key={GEMINI_API_KEY}"
 
     try:
-        if on_progress:
-            on_progress(78, "AI correcting Thai text...")
-
-        logger.info(f"Sending {len(segment_texts)} segments to Gemini for Thai correction")
-
         req_data = json.dumps(request_body).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -111,86 +90,178 @@ async def correct_thai_transcription(
             method="POST",
         )
 
-        with urllib.request.urlopen(req, timeout=60) as response:
-            result = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=120) as response:
+            return json.loads(response.read().decode("utf-8"))
 
-        # Parse Gemini response
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+
+        if e.code == 429 and retry_count < _MAX_RETRIES:
+            delay = _RETRY_DELAYS[min(retry_count, len(_RETRY_DELAYS) - 1)]
+            logger.warning(
+                f"Gemini 429 rate limit — retrying in {delay}s "
+                f"(attempt {retry_count + 1}/{_MAX_RETRIES})"
+            )
+            time.sleep(delay)
+            return _call_gemini(prompt, retry_count + 1)
+
+        logger.error(f"Gemini API HTTP {e.code}: {error_body[:300]}")
+        return None
+
+    except urllib.error.URLError as e:
+        logger.error(f"Gemini connection error: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Gemini call failed: {e}")
+        return None
+
+
+def _parse_response(result: dict) -> tuple[str | None, str | None, list[str] | None]:
+    """Parse Gemini response → (song_name, artist, corrected_lines)."""
+    try:
         candidates = result.get("candidates", [])
         if not candidates:
-            logger.warning("Gemini returned no candidates")
-            return segment_texts
+            return None, None, None
 
         content = candidates[0].get("content", {})
         parts = content.get("parts", [])
         if not parts:
-            logger.warning("Gemini returned no parts")
-            return segment_texts
+            return None, None, None
 
-        response_text = parts[0].get("text", "").strip()
-        logger.info(f"Gemini raw response: {response_text[:200]}")
+        text = parts[0].get("text", "").strip()
+        logger.info(f"Gemini raw response: {text[:300]}")
 
-        # Parse the JSON array response
+        # Parse JSON
         try:
-            corrected = json.loads(response_text)
+            data = json.loads(text)
         except json.JSONDecodeError:
-            # Try to extract JSON array from response
-            match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            # Try to extract JSON from response
+            match = re.search(r'\{.*\}', text, re.DOTALL)
             if match:
-                corrected = json.loads(match.group())
+                data = json.loads(match.group())
             else:
-                # Fallback: split by newlines and strip numbering
-                lines = response_text.strip().split("\n")
-                corrected = []
-                for line in lines:
-                    # Remove numbering like "1. " or "1) "
-                    clean = re.sub(r'^\d+[\.\)]\s*', '', line.strip())
-                    if clean:
-                        corrected.append(clean)
+                logger.warning("Could not parse Gemini JSON response")
+                return None, None, None
 
-        if not isinstance(corrected, list):
-            logger.warning(f"Gemini response is not a list: {type(corrected)}")
-            return segment_texts
+        song = data.get("song")
+        artist = data.get("artist")
+        corrected = data.get("corrected")
 
-        # Validate: must have same number of segments
-        if len(corrected) != len(segment_texts):
-            logger.warning(
-                f"Gemini returned {len(corrected)} lines but expected {len(segment_texts)} — "
-                f"using partial correction"
-            )
-            # Use corrections for matching indices, keep original for rest
-            result_texts = list(segment_texts)
-            for i in range(min(len(corrected), len(segment_texts))):
-                if isinstance(corrected[i], str) and corrected[i].strip():
-                    result_texts[i] = corrected[i].strip()
-            return result_texts
+        if isinstance(corrected, list):
+            return song, artist, corrected
 
-        # Apply corrections
-        result_texts = []
-        changes = 0
-        for i, (original, fixed) in enumerate(zip(segment_texts, corrected)):
-            if isinstance(fixed, str) and fixed.strip():
-                fixed = fixed.strip()
-                if fixed != original:
-                    changes += 1
-                    logger.info(f"  Corrected [{i}]: '{original}' → '{fixed}'")
-                result_texts.append(fixed)
-            else:
-                result_texts.append(original)
+        return song, artist, None
 
-        logger.info(f"Gemini correction: {changes}/{len(segment_texts)} segments changed")
+    except Exception as e:
+        logger.error(f"Failed to parse Gemini response: {e}")
+        return None, None, None
+
+
+async def correct_thai_transcription(
+    segment_texts: list[str],
+    on_progress: Optional[Callable] = None,
+) -> list[str]:
+    """
+    Send Thai transcription segments to Gemini for correction.
+
+    The AI will try to identify the song and correct based on real lyrics.
+    Falls back to language-rule corrections if song is not recognized.
+
+    Returns corrected texts (same length as input).
+    """
+    if not is_available():
+        logger.warning("GEMINI_API_KEY not set — skipping AI correction")
+        return segment_texts
+
+    if not segment_texts:
+        return segment_texts
+
+    if on_progress:
+        on_progress(76, "🤖 AI identifying song and correcting lyrics...")
+
+    total = len(segment_texts)
+    logger.info(f"Sending {total} segments to Gemini for Thai correction")
+
+    # For short transcriptions, send all at once
+    if total <= _CHUNK_SIZE:
+        return _correct_chunk(segment_texts, on_progress)
+
+    # For long transcriptions, process in chunks
+    result = []
+    for i in range(0, total, _CHUNK_SIZE):
+        chunk = segment_texts[i : i + _CHUNK_SIZE]
+        chunk_num = i // _CHUNK_SIZE + 1
+        total_chunks = (total + _CHUNK_SIZE - 1) // _CHUNK_SIZE
 
         if on_progress:
-            on_progress(82, f"AI corrected {changes} segments")
+            pct = 76 + int((i / total) * 8)
+            on_progress(pct, f"🤖 AI correcting chunk {chunk_num}/{total_chunks}...")
 
+        corrected_chunk = _correct_chunk(chunk, None)
+        result.extend(corrected_chunk)
+
+    if on_progress:
+        on_progress(85, "AI correction complete")
+
+    return result
+
+
+def _correct_chunk(
+    texts: list[str],
+    on_progress: Optional[Callable] = None,
+) -> list[str]:
+    """Correct a chunk of segment texts via Gemini."""
+    # Build numbered prompt
+    numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(texts))
+    full_prompt = _CORRECTION_PROMPT + numbered
+
+    # Call Gemini
+    result = _call_gemini(full_prompt)
+    if not result:
+        logger.warning("Gemini returned no result — using original texts")
+        return texts
+
+    song, artist, corrected = _parse_response(result)
+
+    if song:
+        logger.info(f"🎵 Gemini identified song: '{song}' by '{artist or 'unknown'}'")
+    else:
+        logger.info("Gemini could not identify the song")
+
+    if not corrected:
+        logger.warning("Gemini returned no corrections")
+        return texts
+
+    # Validate length
+    if len(corrected) != len(texts):
+        logger.warning(
+            f"Gemini returned {len(corrected)} lines, expected {len(texts)} — "
+            f"using partial corrections"
+        )
+        result_texts = list(texts)
+        for i in range(min(len(corrected), len(texts))):
+            if isinstance(corrected[i], str) and corrected[i].strip():
+                result_texts[i] = corrected[i].strip()
         return result_texts
 
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8", errors="replace")
-        logger.error(f"Gemini API HTTP error {e.code}: {error_body[:300]}")
-        return segment_texts
-    except urllib.error.URLError as e:
-        logger.error(f"Gemini API connection error: {e}")
-        return segment_texts
-    except Exception as e:
-        logger.error(f"Gemini correction failed: {e}")
-        return segment_texts
+    # Apply corrections
+    result_texts = []
+    changes = 0
+    for i, (original, fixed) in enumerate(zip(texts, corrected)):
+        if isinstance(fixed, str) and fixed.strip():
+            fixed = fixed.strip()
+            if fixed != original:
+                changes += 1
+                logger.info(f"  AI fix [{i}]: '{original}' → '{fixed}'")
+            result_texts.append(fixed)
+        else:
+            result_texts.append(original)
+
+    logger.info(f"Gemini correction: {changes}/{len(texts)} segments changed")
+
+    if on_progress and song:
+        on_progress(82, f"🎵 Song: {song} — {changes} segments corrected")
+    elif on_progress:
+        on_progress(82, f"AI corrected {changes} segments")
+
+    return result_texts

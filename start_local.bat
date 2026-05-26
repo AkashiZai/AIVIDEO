@@ -6,8 +6,10 @@ echo   Thai: Gemini AI Post-Correction
 echo ============================================
 echo.
 
-REM Refresh PATH
-set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
+REM Refresh PATH — Python + CUDA libraries from pip packages
+set "PYDIR=%LOCALAPPDATA%\Programs\Python\Python311"
+set "CUDA_LIBS=%PYDIR%\Lib\site-packages\nvidia\cublas\bin;%PYDIR%\Lib\site-packages\nvidia\cudnn\bin;%PYDIR%\Lib\site-packages\nvidia\cuda_runtime\bin"
+set "PATH=%CUDA_LIBS%;%PYDIR%;%PYDIR%\Scripts;%PATH%"
 
 REM Gemini API key for Thai AI correction (paste your key here)
 REM Get a free key from: https://aistudio.google.com/apikey
