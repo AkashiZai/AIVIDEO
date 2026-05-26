@@ -322,6 +322,7 @@ def transcribe_audio(
     - N-gram frequency hallucination post-filter
     - Audio pre-extraction for reliable input
     - Thai song optimization: vowel-rich prompt, relaxed thresholds, temp fallback
+    - Gemini AI post-correction for Thai spelling errors (if API key configured)
     """
     if on_progress:
         on_progress(3, f"Loading model ({model_size.value})...")
@@ -466,18 +467,18 @@ def transcribe_audio(
     clean_segments = _filter_hallucinations(raw_segments)
     logger.info(f"After hallucination filter: {len(clean_segments)}/{len(raw_segments)} segments kept")
 
-    # --- Post-processing: Thai word corrections ---
+    # --- Post-processing: Thai word corrections (dictionary) ---
     if is_thai and on_progress:
-        on_progress(75, "Applying Thai word corrections...")
+        on_progress(73, "Applying Thai word corrections...")
 
-    # Build result
+    # Build initial result segments (before AI correction)
     result_segments: list[TranscriptionSegment] = []
     seg_count = 0
 
     for seg in clean_segments:
         seg_text = seg.text.strip()
 
-        # Apply Thai corrections to segment text
+        # Apply dictionary-based Thai corrections
         if is_thai:
             seg_text = _apply_thai_corrections(seg_text)
 
@@ -485,7 +486,6 @@ def transcribe_audio(
         if seg.words:
             for w in seg.words:
                 word_text = w.word.strip()
-                # Apply Thai corrections to individual words too
                 if is_thai:
                     word_text = _apply_thai_corrections(word_text)
                 words.append(WordTimestamp(
@@ -505,8 +505,78 @@ def transcribe_audio(
         seg_count += 1
 
         if on_progress and total_duration > 0:
-            pct = min(95, int(75 + (seg.end / total_duration) * 20))
+            pct = min(74, int(70 + (seg.end / total_duration) * 4))
             on_progress(pct, f"Segment {seg_count}: {seg_text[:40]}...")
+
+    # --- Post-processing: Gemini AI correction for Thai ---
+    if is_thai and result_segments:
+        try:
+            from gemini_correction import is_available, correct_thai_transcription
+            import asyncio
+
+            if is_available():
+                if on_progress:
+                    on_progress(76, "🤖 AI correcting Thai text with Gemini...")
+
+                logger.info("Starting Gemini AI Thai correction...")
+
+                # Extract texts for correction
+                original_texts = [seg.text for seg in result_segments]
+
+                # Run async correction in sync context
+                loop = None
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    pass
+
+                if loop and loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        corrected_texts = pool.submit(
+                            lambda: asyncio.run(
+                                correct_thai_transcription(original_texts, on_progress)
+                            )
+                        ).result(timeout=90)
+                else:
+                    corrected_texts = asyncio.run(
+                        correct_thai_transcription(original_texts, on_progress)
+                    )
+
+                # Apply corrections back to segments
+                corrections_applied = 0
+                for i, (seg, corrected) in enumerate(zip(result_segments, corrected_texts)):
+                    if corrected != seg.text:
+                        corrections_applied += 1
+                        logger.info(f"  AI fix [{i}]: '{seg.text}' → '{corrected}'")
+
+                        # Update segment text
+                        seg.text = corrected
+
+                        # Rebuild words from corrected text, preserving timing
+                        new_words_text = corrected.strip().split()
+                        if new_words_text and seg.words:
+                            duration = seg.end - seg.start
+                            time_per_word = duration / len(new_words_text)
+                            seg.words = [
+                                WordTimestamp(
+                                    word=w,
+                                    start=round(seg.start + (j * time_per_word), 3),
+                                    end=round(seg.start + ((j + 1) * time_per_word), 3),
+                                    confidence=0.95,
+                                )
+                                for j, w in enumerate(new_words_text)
+                            ]
+
+                logger.info(f"Gemini AI correction: {corrections_applied}/{len(result_segments)} segments fixed")
+
+                if on_progress:
+                    on_progress(85, f"AI corrected {corrections_applied} segments")
+            else:
+                logger.info("Gemini API key not set — skipping AI correction")
+        except Exception as e:
+            logger.warning(f"Gemini AI correction failed (non-fatal): {e}")
+            # Continue with uncorrected segments
 
     duration = result_segments[-1].end if result_segments else total_duration
 

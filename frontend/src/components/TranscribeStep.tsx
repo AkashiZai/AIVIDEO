@@ -221,8 +221,11 @@ export function TranscribeStep() {
             <div className="settings-badges">
               <span className="badge badge-accent">faster-whisper</span>
               <span className="badge badge-accent">VAD filter</span>
-              <span className="badge badge-accent">beam_size=5</span>
+              <span className="badge badge-accent">{transcribeLang === 'th' ? 'beam=10 (TH)' : 'beam=5'}</span>
               <span className="badge badge-accent">word timestamps</span>
+              {transcribeLang === 'th' && (
+                <span className="badge badge-success">🤖 Gemini AI correction</span>
+              )}
             </div>
           </div>
         )}

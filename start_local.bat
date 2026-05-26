@@ -2,11 +2,18 @@
 echo ============================================
 echo   CaptionForge AI - Local Backend
 echo   GPU: RTX 4060 + Whisper large-v3
+echo   Thai: Gemini AI Post-Correction
 echo ============================================
 echo.
 
 REM Refresh PATH
 set "PATH=%LOCALAPPDATA%\Programs\Python\Python311;%LOCALAPPDATA%\Programs\Python\Python311\Scripts;%PATH%"
+
+REM Gemini API key for Thai AI correction (paste your key here)
+REM Get a free key from: https://aistudio.google.com/apikey
+if not defined GEMINI_API_KEY (
+    set "GEMINI_API_KEY=AIzaSyB5jjLrRIj-3n0HOg_wzPHsMBbt9ihF3eg"
+)
 
 cd /d "%~dp0backend"
 
