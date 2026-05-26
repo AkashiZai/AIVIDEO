@@ -39,20 +39,40 @@ def _get_model(model_name: str) -> FWModel:
     """Load and cache a faster-whisper model."""
     if model_name not in _loaded_models:
         logger.info(f"Loading faster-whisper model: {model_name}")
+        model = None
+        # Try CUDA first
         try:
-            _loaded_models[model_name] = FWModel(
+            model = FWModel(
                 model_name,
                 device="cuda",
                 compute_type="float16",
             )
-            logger.info(f"Loaded {model_name} on CUDA (float16)")
-        except Exception:
-            _loaded_models[model_name] = FWModel(
+            # Quick probe to verify CUDA actually works at runtime
+            # (cublas DLL might be missing even if CUDA loads)
+            import numpy as np
+            import io, wave, tempfile
+            # Create a tiny 0.5s silent WAV to test
+            sr = 16000
+            samples = np.zeros(sr // 2, dtype=np.int16)
+            tmp = os.path.join(tempfile.gettempdir(), "_whisper_cuda_test.wav")
+            with wave.open(tmp, "w") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes(samples.tobytes())
+            # This will trigger cublas load
+            list(model.transcribe(tmp, language="en", beam_size=1, vad_filter=False)[0])
+            os.remove(tmp)
+            logger.info(f"Loaded {model_name} on CUDA (float16) — verified working")
+        except Exception as e:
+            logger.warning(f"CUDA failed ({e}), falling back to CPU")
+            model = FWModel(
                 model_name,
                 device="cpu",
                 compute_type="int8",
             )
             logger.info(f"Loaded {model_name} on CPU (int8)")
+        _loaded_models[model_name] = model
     return _loaded_models[model_name]
 
 
