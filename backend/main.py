@@ -125,6 +125,8 @@ async def transcribe_video(job_id: str, request: TranscribeRequest = TranscribeR
             duration=result.duration,
         )
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         await job_manager.update_status(job_id, JobStatus.ERROR, 0, "Failed", str(e))
         raise HTTPException(500, f"Transcription failed: {e}")
 

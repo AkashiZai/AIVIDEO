@@ -123,6 +123,13 @@ body {
 .badge { padding: 3px 10px; border-radius: 50px; font-size: 11px; font-weight: 600; }
 .badge-accent { background: rgba(124, 92, 255, 0.12); color: var(--accent); border: 1px solid rgba(124, 92, 255, 0.2); }
 
+/* Preset buttons */
+.preset-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn-preset { padding: 8px 16px; border-radius: 50px; background: var(--bg-card); border: 1px solid var(--border); color: var(--text-secondary); cursor: pointer; font-family: inherit; font-size: 13px; font-weight: 600; transition: all 0.25s; }
+.btn-preset:hover:not(:disabled) { border-color: var(--accent); color: var(--text-primary); background: var(--bg-card-hover); transform: translateY(-1px); }
+.btn-preset-active { border-color: var(--accent) !important; color: var(--accent) !important; background: rgba(124, 92, 255, 0.1) !important; box-shadow: 0 0 12px rgba(124, 92, 255, 0.15); }
+.btn-preset:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* Transcript editor — word level */
 .transcript-editor { background: var(--bg-secondary); border-radius: var(--radius); padding: 20px; border: 1px solid var(--border); max-height: 450px; overflow-y: auto; }
 .transcript-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }

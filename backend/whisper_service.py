@@ -10,6 +10,15 @@ Anti-hallucination measures:
 - Stricter compression ratio & log probability thresholds
 - N-gram frequency analysis to detect repetitive hallucination patterns
 - Consecutive duplicate segment removal
+
+Thai song/music optimizations:
+- Auto-injected Thai initial prompt covering vowels AND consonant pairs Whisper confuses
+- Relaxed log_prob_threshold for Thai (Thai audio has naturally lower confidence)
+- Music-aware VAD parameters (lower threshold, shorter silence detection)
+- Temperature fallback sampling for ambiguous characters
+- Higher beam_size (10) and best_of (10) for more thorough search
+- condition_on_previous_text=True for Thai (context helps disambiguate consonants)
+- Thai word correction post-processing for common Whisper mistakes
 """
 from __future__ import annotations
 import logging
@@ -211,6 +220,88 @@ def _filter_hallucinations(segments: list) -> list:
     return filtered
 
 
+# Thai-specific initial prompt — contains common Thai vowels, consonant pairs,
+# and word patterns to guide Whisper's decoder toward correct Thai character mappings.
+# Covers BOTH vowel and consonant confusion that Whisper commonly makes.
+_THAI_INITIAL_PROMPT = (
+    "เพลงไทย เนื้อเพลงภาษาไทย ร้องเพลง "
+    # Vowels — all Thai vowel forms
+    "สระอา สระอี สระอู สระเอ สระโอ สระแอ สระออ สระอือ สระอัว "
+    "ไม่ ใจ ได้ ไป ใน ให้ ใช้ ไว้ ไหม ไม้ "
+    "เธอ เขา แล้ว แต่ เพราะ เท่า แค่ เคย "
+    # Consonant pairs Whisper commonly confuses
+    "กว่า กับ กลับ กลัว ก็ กัน การ ก่อน "
+    "ชอบ ช่วง ชีวิต ชื่อ ช้า "
+    "ซ่อน ซึ้ง ซื้อ "
+    "สาย สุด สวย สอง สะออน สบาย "
+    "ทำ ทำไม ที่ ทาง ท้อง ทุก เท่าไหร่ "
+    "ตัว ต้อง ตาม ตา ตลอด "
+    "คน ความ คิด คิดถึง คง คอย คืน "
+    "พอ เพียง เพราะ พูด พบ "
+    "ฟัง ฟ้า "
+    # Common song words with correct spelling
+    "รัก หัวใจ ร้องไห้ ห่วง หา หมด "
+    "อยาก อยู่ อีก อ้อม "
+    "ยัง เย็น ยอม ยาก "
+    "จะ จำ เจ็บ จริง "
+    "ผ่าน ผิด "
+    "นอน นะ น้ำตา "
+    "มี ไม่เคย เมื่อ "
+    "วัน ว่า กว่า อีกกว่า "
+    "บอก บ้าง "
+    "ลืม เลย เล่น แล้ว "
+    "ดี ได้ ด้วย "
+)
+
+
+# Common Thai word corrections for Whisper mistakes.
+# Maps incorrect transcription → correct word.
+# Only applied when language is Thai.
+_THAI_CORRECTIONS: dict[str, str] = {
+    # Consonant confusion: ซ→ช, ซ→ส
+    "ซอบ": "ชอบ",
+    "ซ่อบ": "ชอบ",
+    "ซับ": "ชอบ",
+    "ซีวิต": "ชีวิต",
+    "ซ่วง": "ช่วง",
+    "ซื่อ": "ชื่อ",
+    "ซ้าย": "สาย",
+    "ซวย": "สวย",
+    "ซุด": "สุด",
+    "ซอง": "สอง",
+    "ซบาย": "สบาย",
+    # Consonant confusion: dropped ก in กว่า
+    "จว่า": "กว่า",
+    # Consonant confusion: ท→ต, ต→ท
+    "ท่อง": "ต้อง",
+    "เทา": "เท่า",
+    "เท่าไร่": "เท่าไหร่",
+    "เทาไหร่": "เท่าไหร่",
+    "เท่าหร่": "เท่าไหร่",
+    # Consonant confusion: ค→ก
+    "คลับ": "กลับ",
+    "คลัว": "กลัว",
+    # Tone mark errors
+    "ม่าก": "มาก",
+    "ร้อง": "ร้อง",
+    # Common word-boundary errors
+    "สะ ออน": "สะออน",
+    "หัว ใจ": "หัวใจ",
+    "คิด ถึง": "คิดถึง",
+    "ร้อง ไห้": "ร้องไห้",
+    "ทำ ไม": "ทำไม",
+    "เท่า ไหร่": "เท่าไหร่",
+}
+
+
+def _apply_thai_corrections(text: str) -> str:
+    """Apply Thai word corrections to fix common Whisper transcription mistakes."""
+    result = text
+    for wrong, correct in _THAI_CORRECTIONS.items():
+        result = result.replace(wrong, correct)
+    return result
+
+
 def transcribe_audio(
     audio_path: str,
     model_size: WhisperModel = WhisperModel.BASE,
@@ -230,6 +321,7 @@ def transcribe_audio(
     - Strict compression ratio threshold to reject repetitive output
     - N-gram frequency hallucination post-filter
     - Audio pre-extraction for reliable input
+    - Thai song optimization: vowel-rich prompt, relaxed thresholds, temp fallback
     """
     if on_progress:
         on_progress(3, f"Loading model ({model_size.value})...")
@@ -251,41 +343,80 @@ def transcribe_audio(
     if on_progress:
         on_progress(15, "Transcribing audio...")
 
-    # Build the initial prompt with hotwords appended
+    # Detect if this is Thai content
+    is_thai = language and language.lower() == "th"
+
+    # Build the initial prompt with Thai boost and hotwords
     prompt = initial_prompt or ""
+    if is_thai:
+        # Prepend Thai vowel-rich prompt to guide decoder
+        prompt = _THAI_INITIAL_PROMPT + (" " + prompt if prompt else "")
+        logger.info("Thai language detected — using Thai vowel-rich initial prompt")
     if hotwords:
         hw_str = ", ".join(hotwords)
         prompt = f"{prompt}. Keywords: {hw_str}" if prompt else f"Keywords: {hw_str}"
 
+    # --- Determine parameters based on language ---
+    # Thai songs/music need relaxed thresholds because:
+    # 1. Background music lowers speech confidence scores
+    # 2. Singing stretches vowels, making them harder to classify
+    # 3. Thai tones + music pitch = lower log probabilities
+    if is_thai:
+        vad_threshold = 0.35          # Lower for music (captures singing over instruments)
+        min_silence_ms = 300          # Shorter silence detection for song lyrics
+        min_speech_ms = 100           # Capture shorter sung phrases
+        speech_pad_ms = 200           # More padding to catch vowel tails
+        compression_thresh = 2.2      # Relaxed — Thai song repeats are natural
+        log_prob_thresh = -0.8        # Relaxed — Thai confidence is naturally lower
+        no_speech_thresh = 0.5        # Keep aggressive no-speech detection
+        temperature = (0.0, 0.2, 0.4) # Temperature fallback for ambiguous characters
+        beam = 10                     # More hypotheses → better consonant choices
+        best = 10                     # More candidates to pick from
+        use_prev_text = True          # Context from prev lyrics helps Thai consonants
+        logger.info("Using Thai-optimized transcription parameters (beam=10, condition_prev=True)")
+    else:
+        vad_threshold = 0.40
+        min_silence_ms = 400
+        min_speech_ms = 150
+        speech_pad_ms = 150
+        compression_thresh = 1.8
+        log_prob_thresh = -0.5
+        no_speech_thresh = 0.5
+        temperature = 0.0
+        beam = 5
+        best = 5
+        use_prev_text = False         # Off for non-Thai to prevent hallucination
+
     # --- Primary transcription with VAD ---
-    logger.info(f"Transcribing: model={model_size.value}, language={language}, VAD=True")
+    logger.info(f"Transcribing: model={model_size.value}, language={language}, VAD=True, thai_mode={is_thai}")
 
     segments_iter, info = model.transcribe(
         actual_audio_path,
         # VAD filter — critical for preventing hallucination on silence
         vad_filter=True,
         vad_parameters={
-            "threshold": 0.40,              # Slightly below default 0.5
-            "min_silence_duration_ms": 400,
-            "min_speech_duration_ms": 150,
-            "speech_pad_ms": 150,
+            "threshold": vad_threshold,
+            "min_silence_duration_ms": min_silence_ms,
+            "min_speech_duration_ms": min_speech_ms,
+            "speech_pad_ms": speech_pad_ms,
         },
-        # Beam search
-        beam_size=5,
-        best_of=5,
-        temperature=0.0,
-        # CRITICAL: False prevents repetition loops ("โอเคโอเค...", "โนโนโน...")
-        condition_on_previous_text=False,
+        # Beam search — larger for Thai to explore more consonant hypotheses
+        beam_size=beam,
+        best_of=best,
+        temperature=temperature,
+        # For Thai: True helps carry context (consonant disambiguation)
+        # For others: False prevents repetition loops ("โอเคโอเค...", "โนโนโน...")
+        condition_on_previous_text=use_prev_text,
         # Context
         initial_prompt=prompt if prompt else None,
         # Language
         language=language,  # None = auto-detect
         # Word timestamps
         word_timestamps=True,
-        # Anti-hallucination thresholds (stricter than defaults)
-        compression_ratio_threshold=1.8,    # Default 2.4 — stricter to catch repetition
-        log_prob_threshold=-0.5,            # Default -1.0 — stricter confidence filter
-        no_speech_threshold=0.5,            # Default 0.6 — more aggressive no-speech detection
+        # Anti-hallucination thresholds
+        compression_ratio_threshold=compression_thresh,
+        log_prob_threshold=log_prob_thresh,
+        no_speech_threshold=no_speech_thresh,
     )
 
     detected_language = info.language
@@ -304,19 +435,22 @@ def transcribe_audio(
         if on_progress:
             on_progress(40, "No speech with VAD. Retrying with relaxed settings...")
 
-        logger.info("Fallback: VAD=False, relaxed thresholds")
+        # Fallback with even more relaxed settings
+        fallback_log_prob = -1.0 if is_thai else -0.8
+        fallback_temp = (0.0, 0.2, 0.4, 0.6) if is_thai else 0.0
+        logger.info(f"Fallback: VAD=False, relaxed thresholds, thai={is_thai}")
         segments_iter2, info2 = model.transcribe(
             actual_audio_path,
             vad_filter=False,
-            beam_size=5,
-            best_of=5,
-            temperature=0.0,
-            condition_on_previous_text=False,
+            beam_size=beam,
+            best_of=best,
+            temperature=fallback_temp,
+            condition_on_previous_text=use_prev_text,
             initial_prompt=prompt if prompt else None,
             language=language,
             word_timestamps=True,
-            compression_ratio_threshold=2.0,
-            log_prob_threshold=-0.8,
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=fallback_log_prob,
             no_speech_threshold=0.6,
         )
         raw_segments = list(segments_iter2)
@@ -332,16 +466,30 @@ def transcribe_audio(
     clean_segments = _filter_hallucinations(raw_segments)
     logger.info(f"After hallucination filter: {len(clean_segments)}/{len(raw_segments)} segments kept")
 
+    # --- Post-processing: Thai word corrections ---
+    if is_thai and on_progress:
+        on_progress(75, "Applying Thai word corrections...")
+
     # Build result
     result_segments: list[TranscriptionSegment] = []
     seg_count = 0
 
     for seg in clean_segments:
+        seg_text = seg.text.strip()
+
+        # Apply Thai corrections to segment text
+        if is_thai:
+            seg_text = _apply_thai_corrections(seg_text)
+
         words: list[WordTimestamp] = []
         if seg.words:
             for w in seg.words:
+                word_text = w.word.strip()
+                # Apply Thai corrections to individual words too
+                if is_thai:
+                    word_text = _apply_thai_corrections(word_text)
                 words.append(WordTimestamp(
-                    word=w.word.strip(),
+                    word=word_text,
                     start=round(w.start, 3),
                     end=round(w.end, 3),
                     confidence=round(w.probability, 3),
@@ -349,7 +497,7 @@ def transcribe_audio(
 
         result_segments.append(TranscriptionSegment(
             id=seg_count,
-            text=seg.text.strip(),
+            text=seg_text,
             start=round(seg.start, 3),
             end=round(seg.end, 3),
             words=words,
@@ -358,7 +506,7 @@ def transcribe_audio(
 
         if on_progress and total_duration > 0:
             pct = min(95, int(75 + (seg.end / total_duration) * 20))
-            on_progress(pct, f"Segment {seg_count}: {seg.text[:40].strip()}...")
+            on_progress(pct, f"Segment {seg_count}: {seg_text[:40]}...")
 
     duration = result_segments[-1].end if result_segments else total_duration
 

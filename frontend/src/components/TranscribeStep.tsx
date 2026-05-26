@@ -11,6 +11,46 @@ function confidenceClass(c: number): string {
   return 'conf-low';
 }
 
+// Presets for common use cases
+const PRESETS = [
+  {
+    id: 'thai-song',
+    label: '🎵 เพลงไทย (แม่นสุด)',
+    desc: 'ใช้ Large-v3 สำหรับเนื้อเพลงไทย — แม่นที่สุด แต่ช้ากว่า',
+    model: 'large-v3' as WhisperModel,
+    lang: 'th',
+    prompt: 'เพลงไทย เนื้อเพลงภาษาไทย ร้องเพลง',
+    hotwords: 'รัก,หัวใจ,ชอบ,เธอ,เท่าไหร่,สะออน,คิดถึง,ร้องไห้,กลัว,กว่า,สาย,ชีวิต',
+  },
+  {
+    id: 'thai-song-fast',
+    label: '🎵 เพลงไทย (เร็ว)',
+    desc: 'ใช้ Medium สำหรับเนื้อเพลงไทย — เร็วกว่า แต่แม่นน้อยกว่า',
+    model: 'medium' as WhisperModel,
+    lang: 'th',
+    prompt: 'เพลงไทย เนื้อเพลงภาษาไทย ร้องเพลง',
+    hotwords: 'รัก,หัวใจ,ชอบ,เธอ,เท่าไหร่,สะออน',
+  },
+  {
+    id: 'thai-speech',
+    label: '🗣️ พูดไทย',
+    desc: 'ใช้ Large-v3 สำหรับคนพูดไทยทั่วไป',
+    model: 'large-v3' as WhisperModel,
+    lang: 'th',
+    prompt: 'การพูดภาษาไทย บทสนทนาภาษาไทย',
+    hotwords: '',
+  },
+  {
+    id: 'en-default',
+    label: '🇬🇧 English',
+    desc: 'Default English speech',
+    model: 'base' as WhisperModel,
+    lang: 'en',
+    prompt: '',
+    hotwords: '',
+  },
+] as const;
+
 export function TranscribeStep() {
   const {
     jobId, segments, setSegments, setLanguage, setDetectedLanguage, setStep,
@@ -71,6 +111,16 @@ export function TranscribeStep() {
     }
   }, [jobId, whisperModel, transcribeLang, initialPrompt, hotwords, setSegments, setLanguage, setDetectedLanguage, setTranscribeProgress, setProgressMessage, addToast]);
 
+  const applyPreset = (presetId: string) => {
+    const preset = PRESETS.find(p => p.id === presetId);
+    if (!preset) return;
+    setWhisperModel(preset.model);
+    setTranscribeLang(preset.lang);
+    setInitialPrompt(preset.prompt);
+    setHotwords(preset.hotwords);
+    addToast(`Preset applied: ${preset.label}`, 'info');
+  };
+
   const handleSentenceClick = (segId: number, text: string) => {
     setEditingSegment(segId);
     setEditValue(text);
@@ -97,6 +147,27 @@ export function TranscribeStep() {
 
         {showSettings && (
           <div className="settings-body">
+            {/* Presets Row */}
+            <div className="settings-field">
+              <label>Quick Presets <span className="label-hint">(auto-configure for best accuracy)</span></label>
+              <div className="preset-buttons">
+                {PRESETS.map(p => (
+                  <button
+                    key={p.id}
+                    className={`btn btn-preset ${
+                      whisperModel === p.model && transcribeLang === p.lang ? 'btn-preset-active' : ''
+                    }`}
+                    onClick={() => applyPreset(p.id)}
+                    disabled={isTranscribing}
+                    title={p.desc}
+                    type="button"
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Row 1: Model + Language */}
             <div className="settings-row">
               <div className="settings-field">
