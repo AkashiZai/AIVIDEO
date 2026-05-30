@@ -19,7 +19,20 @@ from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+def _load_api_key() -> str:
+    """Load API key from env var or .env file."""
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        env_path = os.path.join(os.path.dirname(__file__), ".env")
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    if line.strip().startswith("GEMINI_API_KEY="):
+                        key = line.strip().split("=", 1)[1].strip()
+                        break
+    return key
+
+GEMINI_API_KEY = _load_api_key()
 
 # Gemini API endpoint — using gemini-2.5-flash for best quality
 _GEMINI_URL = (
@@ -160,12 +173,15 @@ def _parse_response(result: dict) -> tuple[str | None, str | None, list[str] | N
 async def correct_thai_transcription(
     segment_texts: list[str],
     on_progress: Optional[Callable] = None,
+    reference: str = "",
 ) -> list[str]:
     """
     Send Thai transcription segments to Gemini for correction.
 
-    The AI will try to identify the song and correct based on real lyrics.
-    Falls back to language-rule corrections if song is not recognized.
+    Args:
+        segment_texts: Raw Whisper transcription texts
+        on_progress: Progress callback
+        reference: Reference lyrics from Gemini audio scan (Pass 1)
 
     Returns corrected texts (same length as input).
     """
@@ -177,14 +193,14 @@ async def correct_thai_transcription(
         return segment_texts
 
     if on_progress:
-        on_progress(76, "🤖 AI identifying song and correcting lyrics...")
+        on_progress(76, "🤖 AI correcting lyrics...")
 
     total = len(segment_texts)
-    logger.info(f"Sending {total} segments to Gemini for Thai correction")
+    logger.info(f"Sending {total} segments to Gemini (ref={len(reference)} chars)")
 
     # For short transcriptions, send all at once
     if total <= _CHUNK_SIZE:
-        return _correct_chunk(segment_texts, on_progress)
+        return _correct_chunk(segment_texts, on_progress, reference)
 
     # For long transcriptions, process in chunks
     result = []
@@ -197,7 +213,7 @@ async def correct_thai_transcription(
             pct = 76 + int((i / total) * 8)
             on_progress(pct, f"🤖 AI correcting chunk {chunk_num}/{total_chunks}...")
 
-        corrected_chunk = _correct_chunk(chunk, None)
+        corrected_chunk = _correct_chunk(chunk, None, reference)
         result.extend(corrected_chunk)
 
     if on_progress:
@@ -209,11 +225,15 @@ async def correct_thai_transcription(
 def _correct_chunk(
     texts: list[str],
     on_progress: Optional[Callable] = None,
+    reference: str = "",
 ) -> list[str]:
     """Correct a chunk of segment texts via Gemini."""
     # Build numbered prompt
     numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(texts))
-    full_prompt = _CORRECTION_PROMPT + numbered
+    full_prompt = _CORRECTION_PROMPT
+    if reference:
+        full_prompt += f"\n## เนื้อเพลงอ้างอิง (จาก AI ฟังเสียง):\n{reference}\n\n"
+    full_prompt += "## เนื้อที่ต้องแก้ (จาก Whisper):\n" + numbered
 
     # Call Gemini
     result = _call_gemini(full_prompt)

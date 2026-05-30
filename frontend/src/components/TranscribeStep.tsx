@@ -16,7 +16,7 @@ const PRESETS = [
   {
     id: 'thai-song',
     label: '🎵 เพลงไทย (แม่นสุด)',
-    desc: 'ใช้ Large-v3 สำหรับเนื้อเพลงไทย — แม่นที่สุด แต่ช้ากว่า',
+    desc: 'AI ฟังเพลง → Whisper จับเวลา → Merge (3-pass pipeline)',
     model: 'large-v3' as WhisperModel,
     lang: 'th',
     prompt: 'เพลงไทย เนื้อเพลงภาษาไทย ร้องเพลง',
@@ -224,7 +224,10 @@ export function TranscribeStep() {
               <span className="badge badge-accent">{transcribeLang === 'th' ? 'beam=10 (TH)' : 'beam=5'}</span>
               <span className="badge badge-accent">word timestamps</span>
               {transcribeLang === 'th' && (
-                <span className="badge badge-success">🤖 Gemini AI correction</span>
+                <>
+                  <span className="badge badge-success">🔍 Lyrics Search</span>
+                  <span className="badge badge-success">🤖 AI Correction</span>
+                </>
               )}
             </div>
           </div>

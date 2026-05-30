@@ -370,7 +370,7 @@ def transcribe_audio(
 
     # Step 1: Extract audio to WAV for reliable input
     if on_progress:
-        on_progress(8, "Extracting audio from video...")
+        on_progress(5, "Extracting audio from video...")
 
     extracted_audio = _extract_audio_wav(audio_path)
     actual_audio_path = extracted_audio if extracted_audio else audio_path
@@ -380,18 +380,21 @@ def transcribe_audio(
     else:
         logger.info("Using original file directly for transcription")
 
-    if on_progress:
-        on_progress(15, "Transcribing audio...")
-
     # Detect if this is Thai content
     is_thai = language and language.lower() == "th"
+
+    # Reference lyrics found from web search (set after Pass 2)
+    reference_lyrics: list[str] | None = None
+    song_info: str = ""
+
+    if on_progress:
+        on_progress(15, "Starting Whisper transcription...")
 
     # Build the initial prompt with Thai boost and hotwords
     prompt = initial_prompt or ""
     if is_thai:
-        # Prepend Thai vowel-rich prompt to guide decoder
         prompt = _THAI_INITIAL_PROMPT + (" " + prompt if prompt else "")
-        logger.info("Thai language detected — using Thai vowel-rich initial prompt")
+        logger.info("Thai language detected — using Thai initial prompt")
     if hotwords:
         hw_str = ", ".join(hotwords)
         prompt = f"{prompt}. Keywords: {hw_str}" if prompt else f"Keywords: {hw_str}"
@@ -547,7 +550,48 @@ def transcribe_audio(
             pct = min(74, int(70 + (seg.end / total_duration) * 4))
             on_progress(pct, f"Segment {seg_count}: {seg_text[:40]}...")
 
-    # --- Post-processing: Gemini AI correction for Thai ---
+    # --- PASS 2: Lyrics Search (Thai only) ---
+    # Now that Whisper gave us rough text, search the web for correct lyrics.
+    # This is FREE (no API key needed) and gives us accurate reference lyrics.
+    if is_thai and result_segments:
+        if on_progress:
+            on_progress(75, "🔍 Searching for song lyrics online...")
+
+        whisper_texts = [seg.text for seg in result_segments]
+        logger.info(f"Pass 2: Searching lyrics for {len(whisper_texts)} Whisper segments")
+
+        try:
+            from lyrics_search import search_lyrics, search_lyrics_with_gemini
+
+            # Method 1: Free web search (DuckDuckGo → Thai lyrics sites)
+            search_result = search_lyrics(whisper_texts)
+
+            # Method 2: Fallback to Gemini text-only (cheap)
+            if not search_result:
+                logger.info("Web search found nothing, trying Gemini text identification")
+                if on_progress:
+                    on_progress(76, "🤖 AI identifying song...")
+                search_result = search_lyrics_with_gemini(whisper_texts)
+
+            if search_result and search_result.get("lyrics"):
+                reference_lyrics = search_result["lyrics"]
+                song_info = search_result.get("song", "") or ""
+                source = search_result.get("source", "")
+                logger.info(
+                    f"🎵 Pass 2: Found '{song_info}' — "
+                    f"{len(reference_lyrics)} lyrics lines from {source}"
+                )
+                if on_progress:
+                    on_progress(78, f"🎵 Found: {song_info} ({len(reference_lyrics)} lines)")
+            else:
+                logger.info("Pass 2: No lyrics found from any source")
+        except Exception as e:
+            logger.warning(f"Pass 2 lyrics search failed (non-fatal): {e}")
+
+    # --- PASS 3: Gemini text correction using reference lyrics ---
+    # Send Whisper's text to Gemini for correction.
+    # If we found reference lyrics in Pass 2, include them for much better accuracy.
+    # This keeps Whisper's timestamps perfectly aligned.
     if is_thai and result_segments:
         try:
             from gemini_correction import is_available, correct_thai_transcription
@@ -555,14 +599,20 @@ def transcribe_audio(
 
             if is_available():
                 if on_progress:
-                    on_progress(76, "🤖 AI correcting Thai text with Gemini...")
+                    if reference_lyrics:
+                        on_progress(80, "🤖 Pass 3: AI correcting with reference lyrics...")
+                    else:
+                        on_progress(80, "🤖 AI correcting Thai text...")
 
-                logger.info("Starting Gemini AI Thai correction...")
-
-                # Extract texts for correction
+                logger.info("Pass 3: Gemini text correction")
                 original_texts = [seg.text for seg in result_segments]
 
-                # Run async correction in sync context
+                # Build reference context from Pass 2 lyrics search
+                reference = ""
+                if reference_lyrics:
+                    reference = " ".join(reference_lyrics)
+                    logger.info(f"Using {len(reference_lyrics)} reference lyrics for correction")
+
                 loop = None
                 try:
                     loop = asyncio.get_running_loop()
@@ -574,48 +624,45 @@ def transcribe_audio(
                     with concurrent.futures.ThreadPoolExecutor() as pool:
                         corrected_texts = pool.submit(
                             lambda: asyncio.run(
-                                correct_thai_transcription(original_texts, on_progress)
+                                correct_thai_transcription(
+                                    original_texts, on_progress, reference
+                                )
                             )
                         ).result(timeout=90)
                 else:
                     corrected_texts = asyncio.run(
-                        correct_thai_transcription(original_texts, on_progress)
+                        correct_thai_transcription(
+                            original_texts, on_progress, reference
+                        )
                     )
 
-                # Apply corrections back to segments
+                # Apply corrections — only change TEXT, keep all timestamps
                 corrections_applied = 0
                 for i, (seg, corrected) in enumerate(zip(result_segments, corrected_texts)):
                     if corrected != seg.text:
                         corrections_applied += 1
-                        logger.info(f"  AI fix [{i}]: '{seg.text}' → '{corrected}'")
-
-                        # Update segment text
+                        logger.info(f"  Fix [{i}]: '{seg.text}' → '{corrected}'")
                         seg.text = corrected
-
-                        # Rebuild words from corrected text, preserving timing
-                        new_words_text = corrected.strip().split()
-                        if new_words_text and seg.words:
-                            duration = seg.end - seg.start
-                            time_per_word = duration / len(new_words_text)
+                        # Rebuild word timestamps within this segment's time range
+                        new_words = corrected.strip().split()
+                        if new_words:
+                            dur = seg.end - seg.start
+                            tpw = dur / len(new_words)
                             seg.words = [
                                 WordTimestamp(
-                                    word=w,
-                                    start=round(seg.start + (j * time_per_word), 3),
-                                    end=round(seg.start + ((j + 1) * time_per_word), 3),
+                                    word=w, start=round(seg.start + j*tpw, 3),
+                                    end=round(seg.start + (j+1)*tpw, 3),
                                     confidence=0.95,
-                                )
-                                for j, w in enumerate(new_words_text)
+                                ) for j, w in enumerate(new_words)
                             ]
 
-                logger.info(f"Gemini AI correction: {corrections_applied}/{len(result_segments)} segments fixed")
-
+                logger.info(f"Pass 3: {corrections_applied}/{len(result_segments)} segments corrected")
                 if on_progress:
-                    on_progress(85, f"AI corrected {corrections_applied} segments")
-            else:
-                logger.info("Gemini API key not set — skipping AI correction")
+                    msg = f"🎵 {song_info} — {corrections_applied} fixed" if song_info else f"AI corrected {corrections_applied} segments"
+                    on_progress(85, msg)
         except Exception as e:
-            logger.warning(f"Gemini AI correction failed (non-fatal): {e}")
-            # Continue with uncorrected segments
+            logger.warning(f"Pass 3 correction failed (non-fatal): {e}")
+
 
     duration = result_segments[-1].end if result_segments else total_duration
 
