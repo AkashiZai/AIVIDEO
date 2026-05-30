@@ -4,7 +4,7 @@ Upload video → AI transcribes speech → pick caption style → preview → ex
 
 ## Architecture
 
-- **Backend**: Python + FastAPI + OpenAI Whisper + FFmpeg
+- **Backend**: Python + FastAPI + OpenAI Whisper + Typhoon Thai LLM + FFmpeg
 - **Frontend**: React + Vite + TypeScript + Zustand
 - **Communication**: REST API + WebSocket (real-time progress)
 
@@ -56,6 +56,7 @@ Railway offers a free tier with $5/month credits — plenty for light use.
 |----------|---------|-------------|
 | `WHISPER_MODEL` | `base` | Whisper model size |
 | `MAX_UPLOAD_MB` | `500` | Max upload file size |
+| `TYPHOON_API_KEY` | — | Typhoon Thai LLM API key (from [opentyphoon.ai](https://opentyphoon.ai)) |
 
 ### Option 2: Render
 
@@ -155,6 +156,7 @@ Each style supports: **Font Size** (S/M/L) · **Text Color** (6 presets + custom
 │   ├── Dockerfile          # Docker image with FFmpeg
 │   ├── main.py             # FastAPI routes + WebSocket
 │   ├── whisper_service.py  # Whisper transcription
+│   ├── typhoon_correction.py # Typhoon Thai LLM correction
 │   ├── ffmpeg_service.py   # FFmpeg caption burning
 │   ├── caption_styles.py   # 4 drawtext filter builders
 │   ├── job_manager.py      # Job state + WS broadcast

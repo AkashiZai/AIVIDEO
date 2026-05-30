@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useStore } from '../store';
 import { transcribeVideo, ProgressWebSocket } from '../api';
 import { ProgressBar } from './ProgressBar';
-import { WHISPER_MODELS, LANGUAGES } from '../types';
-import type { WhisperModel } from '../types';
+import { ASR_MODELS, LANGUAGES } from '../types';
+import type { ASRModel } from '../types';
 
 function confidenceClass(c: number): string {
   if (c >= 0.85) return 'conf-high';
@@ -17,7 +17,7 @@ const PRESETS = [
     id: 'thai-song',
     label: '🎵 เพลงไทย (แม่นสุด)',
     desc: 'AI ฟังเพลง → Whisper จับเวลา → Merge (3-pass pipeline)',
-    model: 'large-v3' as WhisperModel,
+    model: 'large-v3' as ASRModel,
     lang: 'th',
     prompt: 'เพลงไทย เนื้อเพลงภาษาไทย ร้องเพลง',
     hotwords: 'รัก,หัวใจ,ชอบ,เธอ,เท่าไหร่,สะออน,คิดถึง,ร้องไห้,กลัว,กว่า,สาย,ชีวิต',
@@ -26,7 +26,7 @@ const PRESETS = [
     id: 'thai-song-fast',
     label: '🎵 เพลงไทย (เร็ว)',
     desc: 'ใช้ Medium สำหรับเนื้อเพลงไทย — เร็วกว่า แต่แม่นน้อยกว่า',
-    model: 'medium' as WhisperModel,
+    model: 'medium' as ASRModel,
     lang: 'th',
     prompt: 'เพลงไทย เนื้อเพลงภาษาไทย ร้องเพลง',
     hotwords: 'รัก,หัวใจ,ชอบ,เธอ,เท่าไหร่,สะออน',
@@ -35,7 +35,7 @@ const PRESETS = [
     id: 'thai-speech',
     label: '🗣️ พูดไทย',
     desc: 'ใช้ Large-v3 สำหรับคนพูดไทยทั่วไป',
-    model: 'large-v3' as WhisperModel,
+    model: 'large-v3' as ASRModel,
     lang: 'th',
     prompt: 'การพูดภาษาไทย บทสนทนาภาษาไทย',
     hotwords: '',
@@ -44,7 +44,7 @@ const PRESETS = [
     id: 'en-default',
     label: '🇬🇧 English',
     desc: 'Default English speech',
-    model: 'base' as WhisperModel,
+    model: 'base' as ASRModel,
     lang: 'en',
     prompt: '',
     hotwords: '',
@@ -54,7 +54,7 @@ const PRESETS = [
 export function TranscribeStep() {
   const {
     jobId, segments, setSegments, setLanguage, setDetectedLanguage, setStep,
-    whisperModel, setWhisperModel,
+    asrModel, setASRModel,
     transcribeLang, setTranscribeLang,
     initialPrompt, setInitialPrompt,
     hotwords, setHotwords,
@@ -91,7 +91,7 @@ export function TranscribeStep() {
     try {
       const hwList = hotwords.split(',').map(w => w.trim()).filter(Boolean);
       const r = await transcribeVideo(jobId, {
-        model: whisperModel,
+        model: asrModel,
         language: transcribeLang,
         initial_prompt: initialPrompt || null,
         hotwords: hwList,
@@ -109,12 +109,12 @@ export function TranscribeStep() {
       ws.disconnect(); wsRef.current = null;
       setTranscribeProgress(100);
     }
-  }, [jobId, whisperModel, transcribeLang, initialPrompt, hotwords, setSegments, setLanguage, setDetectedLanguage, setTranscribeProgress, setProgressMessage, addToast]);
+  }, [jobId, asrModel, transcribeLang, initialPrompt, hotwords, setSegments, setLanguage, setDetectedLanguage, setTranscribeProgress, setProgressMessage, addToast]);
 
   const applyPreset = (presetId: string) => {
     const preset = PRESETS.find(p => p.id === presetId);
     if (!preset) return;
-    setWhisperModel(preset.model);
+    setASRModel(preset.model);
     setTranscribeLang(preset.lang);
     setInitialPrompt(preset.prompt);
     setHotwords(preset.hotwords);
@@ -155,7 +155,7 @@ export function TranscribeStep() {
                   <button
                     key={p.id}
                     className={`btn btn-preset ${
-                      whisperModel === p.model && transcribeLang === p.lang ? 'btn-preset-active' : ''
+                      asrModel === p.model && transcribeLang === p.lang ? 'btn-preset-active' : ''
                     }`}
                     onClick={() => applyPreset(p.id)}
                     disabled={isTranscribing}
@@ -172,8 +172,8 @@ export function TranscribeStep() {
             <div className="settings-row">
               <div className="settings-field">
                 <label htmlFor="wm">Accuracy Mode</label>
-                <select id="wm" value={whisperModel} onChange={(e) => setWhisperModel(e.target.value as WhisperModel)} disabled={isTranscribing}>
-                  {WHISPER_MODELS.map(m => (
+                <select id="wm" value={asrModel} onChange={(e) => setASRModel(e.target.value as ASRModel)} disabled={isTranscribing}>
+                  {ASR_MODELS.map(m => (
                     <option key={m.value} value={m.value}>{m.label} — {m.desc}</option>
                   ))}
                 </select>
@@ -241,7 +241,7 @@ export function TranscribeStep() {
             🧠 Start Transcription
           </button>
           <p className="loading-text">
-            Using <strong>{WHISPER_MODELS.find(m => m.value === whisperModel)?.label}</strong> model
+            Using <strong>{ASR_MODELS.find(m => m.value === asrModel)?.label}</strong> model
             {transcribeLang ? ` • ${LANGUAGES.find(l => l.code === transcribeLang)?.label}` : ' • Auto-detect language'}
           </p>
         </div>

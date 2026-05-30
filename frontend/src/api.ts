@@ -1,4 +1,4 @@
-import type { UploadResponse, TranscribeResponse, ExportResponse, TranscriptionSegment, CaptionConfig, WhisperModel, WSProgressMessage } from './types';
+import type { UploadResponse, TranscribeResponse, ExportResponse, TranscriptionSegment, CaptionConfig, ASRModel, WSProgressMessage } from './types';
 
 // In dev, route through Vite proxy (/api) to bypass CORS.
 // In production builds, use the full VITE_API_URL.
@@ -17,7 +17,7 @@ export async function uploadVideo(file: File): Promise<UploadResponse> {
 }
 
 export interface TranscribeParams {
-  model: WhisperModel;
+  model: ASRModel;
   language: string | null;
   initial_prompt: string | null;
   hotwords: string[];

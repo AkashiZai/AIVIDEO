@@ -35,12 +35,9 @@ class CaptionPosition(str, Enum):
     BOTTOM = "bottom"
 
 
-class WhisperModel(str, Enum):
-    TINY = "tiny"
-    BASE = "base"
-    SMALL = "small"
-    MEDIUM = "medium"
-    LARGE_V3 = "large-v3"
+class ASRModel(str, Enum):
+    TYPHOON_ASR = "typhoon-asr-realtime"
+    TYPHOON_ISAN_ASR = "typhoon-isan-asr-realtime"
 
 
 class WordTimestamp(BaseModel):
@@ -79,7 +76,7 @@ class UploadResponse(BaseModel):
 
 
 class TranscribeRequest(BaseModel):
-    model: WhisperModel = WhisperModel.BASE
+    model: ASRModel = ASRModel.TYPHOON_ASR
     language: Optional[str] = None          # null = auto-detect
     initial_prompt: Optional[str] = None    # context hint
     hotwords: list[str] = Field(default_factory=list)  # boost specific words

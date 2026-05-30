@@ -5,14 +5,14 @@ export interface TranscriptionResult { segments: TranscriptionSegment[]; languag
 export type CaptionStyleType = 'tiktok' | 'subtitle' | 'word_by_word' | 'karaoke';
 export type FontSize = 'small' | 'medium' | 'large';
 export type CaptionPosition = 'top' | 'center' | 'bottom';
-export type WhisperModel = 'tiny' | 'base' | 'small' | 'medium' | 'large-v3';
+export type ASRModel = 'typhoon-asr-realtime' | 'typhoon-isan-asr-realtime';
 export type AppStep = 1 | 2 | 3 | 4;
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
 
 export interface CaptionConfig { style: CaptionStyleType; font_size: FontSize; text_color: string; position: CaptionPosition; }
 
 export interface TranscribeSettings {
-  model: WhisperModel;
+  model: ASRModel;
   language: string | null;     // null = auto-detect
   initial_prompt: string;      // context hint
   hotwords: string;            // comma-separated
@@ -31,12 +31,9 @@ export const FONT_SIZES: { value: FontSize; label: string; px: number }[] = [
   { value: 'large', label: 'Large', px: 60 },
 ];
 
-export const WHISPER_MODELS: { value: WhisperModel; label: string; desc: string }[] = [
-  { value: 'tiny', label: 'Tiny', desc: 'Fastest, lower quality (~75MB)' },
-  { value: 'base', label: 'Base', desc: 'Recommended — fast & accurate (~150MB)' },
-  { value: 'small', label: 'Small', desc: 'Better accuracy (~500MB)' },
-  { value: 'medium', label: 'Medium', desc: 'High quality (~1.5GB RAM)' },
-  { value: 'large-v3', label: 'Large v3', desc: 'Best accuracy (~3GB RAM)' },
+export const ASR_MODELS: { value: ASRModel; label: string; desc: string }[] = [
+  { value: 'typhoon-asr-realtime', label: 'Typhoon ASR', desc: 'Fast and accurate for general Thai speech' },
+  { value: 'typhoon-isan-asr-realtime', label: 'Typhoon Isan ASR', desc: 'Specialized for Isan dialect and general Thai' },
 ];
 
 export const LANGUAGES: { code: string | null; label: string }[] = [

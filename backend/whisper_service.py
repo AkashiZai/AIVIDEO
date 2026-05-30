@@ -1,79 +1,24 @@
 """
-Whisper Service — Speech-to-text using faster-whisper (CTranslate2).
+ASR Service — Speech-to-text using Typhoon ASR API.
 
-faster-whisper is ~5x faster than openai-whisper with comparable accuracy.
-Uses CTranslate2 for optimized inference on CPU/GPU.
-
-Anti-hallucination measures:
-- VAD filter with tuned sensitivity
-- condition_on_previous_text=False to prevent repetition loops
-- Stricter compression ratio & log probability thresholds
-- N-gram frequency analysis to detect repetitive hallucination patterns
-- Consecutive duplicate segment removal
-
-Thai song/music optimizations:
-- Auto-injected Thai initial prompt covering vowels AND consonant pairs Whisper confuses
-- Relaxed log_prob_threshold for Thai (Thai audio has naturally lower confidence)
-- Music-aware VAD parameters (lower threshold, shorter silence detection)
-- Temperature fallback sampling for ambiguous characters
-- Higher beam_size (10) and best_of (10) for more thorough search
-- condition_on_previous_text=True for Thai (context helps disambiguate consonants)
-- Thai word correction post-processing for common Whisper mistakes
+Replaces local faster-whisper with the Typhoon ASR endpoint.
+Supports word-level timestamps and Thai-optimized transcription.
 """
 from __future__ import annotations
 import logging
 import os
 import re
 import subprocess
+import json
+import requests
 from typing import Optional, Callable
-from faster_whisper import WhisperModel as FWModel
-from models import TranscriptionResult, TranscriptionSegment, WordTimestamp, WhisperModel
+from models import TranscriptionResult, TranscriptionSegment, WordTimestamp, ASRModel
+from typhoon_correction import TYPHOON_API_KEY
 
 logger = logging.getLogger(__name__)
 
-# Cache loaded models by name
-_loaded_models: dict[str, FWModel] = {}
-
-
-def _get_model(model_name: str) -> FWModel:
-    """Load and cache a faster-whisper model."""
-    if model_name not in _loaded_models:
-        logger.info(f"Loading faster-whisper model: {model_name}")
-        model = None
-        # Try CUDA first
-        try:
-            model = FWModel(
-                model_name,
-                device="cuda",
-                compute_type="float16",
-            )
-            # Quick probe to verify CUDA actually works at runtime
-            # (cublas DLL might be missing even if CUDA loads)
-            import numpy as np
-            import io, wave, tempfile
-            # Create a tiny 0.5s silent WAV to test
-            sr = 16000
-            samples = np.zeros(sr // 2, dtype=np.int16)
-            tmp = os.path.join(tempfile.gettempdir(), "_whisper_cuda_test.wav")
-            with wave.open(tmp, "w") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(sr)
-                wf.writeframes(samples.tobytes())
-            # This will trigger cublas load
-            list(model.transcribe(tmp, language="en", beam_size=1, vad_filter=False)[0])
-            os.remove(tmp)
-            logger.info(f"Loaded {model_name} on CUDA (float16) — verified working")
-        except Exception as e:
-            logger.warning(f"CUDA failed ({e}), falling back to CPU")
-            model = FWModel(
-                model_name,
-                device="cpu",
-                compute_type="int8",
-            )
-            logger.info(f"Loaded {model_name} on CPU (int8)")
-        _loaded_models[model_name] = model
-    return _loaded_models[model_name]
+# Cache for extracted audio files
+_audio_cache = {}
 
 
 def _extract_audio_wav(input_path: str) -> Optional[str]:
@@ -87,7 +32,7 @@ def _extract_audio_wav(input_path: str) -> Optional[str]:
 
     # Multiple strategies — some ffmpeg builds don't have all codecs
     strategies = [
-        # Strategy 1: Standard PCM WAV (best for Whisper)
+        # Strategy 1: Standard PCM WAV
         [
             "ffmpeg", "-y", "-i", input_path,
             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
@@ -98,12 +43,6 @@ def _extract_audio_wav(input_path: str) -> Optional[str]:
             "ffmpeg", "-y", "-i", input_path,
             "-vn", "-ar", "16000", "-ac", "1",
             audio_path,
-        ],
-        # Strategy 3: Use FLAC (lossless, widely supported)
-        [
-            "ffmpeg", "-y", "-i", input_path,
-            "-vn", "-acodec", "flac", "-ar", "16000", "-ac", "1",
-            audio_path.replace(".wav", ".flac"),
         ],
     ]
 
@@ -130,37 +69,25 @@ def _extract_audio_wav(input_path: str) -> Optional[str]:
         except Exception as e:
             logger.info(f"Strategy {i+1} error: {e}")
 
-    logger.warning("All ffmpeg strategies failed — Whisper will use video directly")
-    return None
+    logger.warning("All ffmpeg strategies failed — returning original video path")
+    return input_path
 
 
 def _is_hallucinated_segment(text: str) -> bool:
-    """
-    Detect if a segment is a Whisper hallucination using n-gram frequency analysis.
-
-    This catches patterns like:
-    - "โอเคโอเคโอเค..." (same phrase repeated)
-    - "โอโนโนโนโนโน..." (variant pattern with high-frequency substring)
-    - "ขอบคุณที่รับชม" (common ending hallucination)
-    """
+    """Detect if a segment is a hallucination using n-gram frequency analysis."""
     text = text.strip()
     if not text:
         return True
     if len(text) <= 1:
         return True
 
-    # Remove whitespace for pattern analysis
     clean = re.sub(r'\s+', '', text)
     text_len = len(clean)
 
     if text_len < 6:
         return False
 
-    # ----- N-gram frequency analysis -----
-    # Instead of only checking the prefix, find the MOST FREQUENT n-gram
-    # of each length and check if it dominates the text
     for ngram_len in range(1, min(12, text_len // 2 + 1)):
-        # Count all n-grams of this length
         ngram_counts: dict[str, int] = {}
         for i in range(text_len - ngram_len + 1):
             ngram = clean[i:i + ngram_len]
@@ -169,15 +96,10 @@ def _is_hallucinated_segment(text: str) -> bool:
         if not ngram_counts:
             continue
 
-        # Find the most frequent n-gram
         top_ngram = max(ngram_counts, key=ngram_counts.get)  # type: ignore
         top_count = ngram_counts[top_ngram]
-
-        # Calculate how much of the text is covered by this n-gram
         coverage = (top_count * ngram_len) / text_len
 
-        # For very short n-grams (1-2 chars), require higher coverage
-        # For longer n-grams (3+), lower coverage threshold
         if ngram_len <= 2:
             threshold = 0.65
             min_repeats = 5
@@ -195,7 +117,6 @@ def _is_hallucinated_segment(text: str) -> bool:
             )
             return True
 
-    # ----- Known standalone hallucination phrases -----
     hallucination_phrases = [
         "ขอบคุณที่รับชม",
         "thank you for watching",
@@ -207,7 +128,6 @@ def _is_hallucinated_segment(text: str) -> bool:
     ]
     lower_text = text.lower().strip()
     for phrase in hallucination_phrases:
-        # Only flag if the phrase IS the whole segment (or nearly)
         if lower_text == phrase or (len(lower_text) < len(phrase) + 10 and phrase in lower_text):
             logger.info(f"Known hallucination phrase: '{text[:60]}'")
             return True
@@ -215,13 +135,8 @@ def _is_hallucinated_segment(text: str) -> bool:
     return False
 
 
-def _filter_hallucinations(segments: list) -> list:
-    """
-    Post-process segments to remove hallucinated ones.
-    - Removes individually hallucinated segments (repetitive text)
-    - Removes consecutive duplicate segments
-    - Removes all segments if they're all identical (full hallucination)
-    """
+def _filter_hallucinations(segments: list[TranscriptionSegment]) -> list[TranscriptionSegment]:
+    """Post-process segments to remove hallucinated ones."""
     if not segments:
         return segments
 
@@ -231,12 +146,10 @@ def _filter_hallucinations(segments: list) -> list:
     for seg in segments:
         text = seg.text.strip() if hasattr(seg, 'text') else ""
 
-        # Skip individually hallucinated segments
         if _is_hallucinated_segment(text):
             logger.info(f"Removing hallucinated segment [{seg.start:.1f}-{seg.end:.1f}]: '{text[:80]}'")
             continue
 
-        # Skip consecutive duplicates
         if text == prev_text and text:
             logger.info(f"Removing duplicate segment [{seg.start:.1f}-{seg.end:.1f}]: '{text[:60]}'")
             continue
@@ -244,7 +157,6 @@ def _filter_hallucinations(segments: list) -> list:
         filtered.append(seg)
         prev_text = text
 
-    # If ALL remaining segments have identical text → full hallucination
     if len(filtered) > 2:
         texts = [s.text.strip() for s in filtered if hasattr(s, 'text')]
         unique_texts = set(texts)
@@ -259,45 +171,7 @@ def _filter_hallucinations(segments: list) -> list:
     return filtered
 
 
-# Thai-specific initial prompt — contains common Thai vowels, consonant pairs,
-# and word patterns to guide Whisper's decoder toward correct Thai character mappings.
-# Covers BOTH vowel and consonant confusion that Whisper commonly makes.
-_THAI_INITIAL_PROMPT = (
-    "เพลงไทย เนื้อเพลงภาษาไทย ร้องเพลง "
-    # Vowels — all Thai vowel forms
-    "สระอา สระอี สระอู สระเอ สระโอ สระแอ สระออ สระอือ สระอัว "
-    "ไม่ ใจ ได้ ไป ใน ให้ ใช้ ไว้ ไหม ไม้ "
-    "เธอ เขา แล้ว แต่ เพราะ เท่า แค่ เคย "
-    # Consonant pairs Whisper commonly confuses
-    "กว่า กับ กลับ กลัว ก็ กัน การ ก่อน "
-    "ชอบ ช่วง ชีวิต ชื่อ ช้า "
-    "ซ่อน ซึ้ง ซื้อ "
-    "สาย สุด สวย สอง สะออน สบาย "
-    "ทำ ทำไม ที่ ทาง ท้อง ทุก เท่าไหร่ "
-    "ตัว ต้อง ตาม ตา ตลอด "
-    "คน ความ คิด คิดถึง คง คอย คืน "
-    "พอ เพียง เพราะ พูด พบ "
-    "ฟัง ฟ้า "
-    # Common song words with correct spelling
-    "รัก หัวใจ ร้องไห้ ห่วง หา หมด "
-    "อยาก อยู่ อีก อ้อม "
-    "ยัง เย็น ยอม ยาก "
-    "จะ จำ เจ็บ จริง "
-    "ผ่าน ผิด "
-    "นอน นะ น้ำตา "
-    "มี ไม่เคย เมื่อ "
-    "วัน ว่า กว่า อีกกว่า "
-    "บอก บ้าง "
-    "ลืม เลย เล่น แล้ว "
-    "ดี ได้ ด้วย "
-)
-
-
-# Common Thai word corrections for Whisper mistakes.
-# Maps incorrect transcription → correct word.
-# Only applied when language is Thai.
 _THAI_CORRECTIONS: dict[str, str] = {
-    # Consonant confusion: ซ→ช, ซ→ส
     "ซอบ": "ชอบ",
     "ซ่อบ": "ชอบ",
     "ซับ": "ชอบ",
@@ -309,21 +183,16 @@ _THAI_CORRECTIONS: dict[str, str] = {
     "ซุด": "สุด",
     "ซอง": "สอง",
     "ซบาย": "สบาย",
-    # Consonant confusion: dropped ก in กว่า
     "จว่า": "กว่า",
-    # Consonant confusion: ท→ต, ต→ท
     "ท่อง": "ต้อง",
     "เทา": "เท่า",
     "เท่าไร่": "เท่าไหร่",
     "เทาไหร่": "เท่าไหร่",
     "เท่าหร่": "เท่าไหร่",
-    # Consonant confusion: ค→ก
     "คลับ": "กลับ",
     "คลัว": "กลัว",
-    # Tone mark errors
     "ม่าก": "มาก",
     "ร้อง": "ร้อง",
-    # Common word-boundary errors
     "สะ ออน": "สะออน",
     "หัว ใจ": "หัวใจ",
     "คิด ถึง": "คิดถึง",
@@ -334,7 +203,7 @@ _THAI_CORRECTIONS: dict[str, str] = {
 
 
 def _apply_thai_corrections(text: str) -> str:
-    """Apply Thai word corrections to fix common Whisper transcription mistakes."""
+    """Apply Thai word corrections."""
     result = text
     for wrong, correct in _THAI_CORRECTIONS.items():
         result = result.replace(wrong, correct)
@@ -343,307 +212,235 @@ def _apply_thai_corrections(text: str) -> str:
 
 def transcribe_audio(
     audio_path: str,
-    model_size: WhisperModel = WhisperModel.BASE,
+    model_size: ASRModel = ASRModel.TYPHOON_ASR,
     language: Optional[str] = None,
     initial_prompt: Optional[str] = None,
     hotwords: Optional[list[str]] = None,
     on_progress: Optional[Callable[[int, str], None]] = None,
 ) -> TranscriptionResult:
     """
-    Transcribe audio using faster-whisper with robust anti-hallucination.
-
-    Features:
-    - VAD filter to skip silence
-    - Word-level timestamps
-    - Beam search for accuracy
-    - condition_on_previous_text=False to prevent repetition loops
-    - Strict compression ratio threshold to reject repetitive output
-    - N-gram frequency hallucination post-filter
-    - Audio pre-extraction for reliable input
-    - Thai song optimization: vowel-rich prompt, relaxed thresholds, temp fallback
-    - Gemini AI post-correction for Thai spelling errors (if API key configured)
+    Transcribe audio using Typhoon ASR API.
     """
-    if on_progress:
-        on_progress(3, f"Loading model ({model_size.value})...")
+    if not TYPHOON_API_KEY:
+        raise ValueError("TYPHOON_API_KEY is not set")
 
-    model = _get_model(model_size.value)
-
-    # Step 1: Extract audio to WAV for reliable input
     if on_progress:
         on_progress(5, "Extracting audio from video...")
 
-    extracted_audio = _extract_audio_wav(audio_path)
-    actual_audio_path = extracted_audio if extracted_audio else audio_path
+    actual_audio_path = _extract_audio_wav(audio_path)
 
-    if extracted_audio:
-        logger.info("Using extracted WAV audio for transcription")
-    else:
-        logger.info("Using original file directly for transcription")
-
-    # Detect if this is Thai content
     is_thai = language and language.lower() == "th"
-
-    # Reference lyrics found from web search (set after Pass 2)
-    reference_lyrics: list[str] | None = None
-    song_info: str = ""
+    # For Typhoon ASR, we'll assume it handles Thai by default, especially typhoon-isan-asr-realtime
 
     if on_progress:
-        on_progress(15, "Starting Whisper transcription...")
+        on_progress(15, f"Calling Typhoon ASR API ({model_size.value})...")
 
-    # Build the initial prompt with Thai boost and hotwords
-    prompt = initial_prompt or ""
-    if is_thai:
-        prompt = _THAI_INITIAL_PROMPT + (" " + prompt if prompt else "")
-        logger.info("Thai language detected — using Thai initial prompt")
-    if hotwords:
-        hw_str = ", ".join(hotwords)
-        prompt = f"{prompt}. Keywords: {hw_str}" if prompt else f"Keywords: {hw_str}"
+    # Call Typhoon ASR API
+    api_url = "https://api.opentyphoon.ai/v1/audio/transcriptions"
+    
+    # We must send standard form-data
+    headers = {
+        "Authorization": f"Bearer {TYPHOON_API_KEY}"
+    }
+    
+    data = {
+        "model": model_size.value,
+        "response_format": "verbose_json",
+        "timestamp_granularities[]": "word",
+    }
+    
+    if initial_prompt:
+        data["prompt"] = initial_prompt
+    if language:
+        data["language"] = language
 
-    # --- Determine parameters based on language ---
-    # Thai songs/music need relaxed thresholds because:
-    # 1. Background music lowers speech confidence scores
-    # 2. Singing stretches vowels, making them harder to classify
-    # 3. Thai tones + music pitch = lower log probabilities
-    if is_thai:
-        vad_threshold = 0.35          # Lower for music (captures singing over instruments)
-        min_silence_ms = 300          # Shorter silence detection for song lyrics
-        min_speech_ms = 100           # Capture shorter sung phrases
-        speech_pad_ms = 200           # More padding to catch vowel tails
-        compression_thresh = 2.2      # Relaxed — Thai song repeats are natural
-        log_prob_thresh = -0.8        # Relaxed — Thai confidence is naturally lower
-        no_speech_thresh = 0.5        # Keep aggressive no-speech detection
-        temperature = (0.0, 0.2, 0.4) # Temperature fallback for ambiguous characters
-        beam = 10                     # More hypotheses → better consonant choices
-        best = 10                     # More candidates to pick from
-        use_prev_text = True          # Context from prev lyrics helps Thai consonants
-        logger.info("Using Thai-optimized transcription parameters (beam=10, condition_prev=True)")
+    try:
+        with open(actual_audio_path, "rb") as f:
+            files = {"file": (os.path.basename(actual_audio_path), f, "audio/wav")}
+            response = requests.post(api_url, headers=headers, data=data, files=files, timeout=300)
+            
+        if response.status_code != 200:
+            logger.error(f"Typhoon ASR Error: {response.text}")
+            raise Exception(f"Typhoon ASR API returned status {response.status_code}")
+            
+        result_json = response.json()
+    except Exception as e:
+        logger.error(f"Transcription failed: {e}")
+        raise e
+        
+    if on_progress:
+        on_progress(60, "Processing ASR results...")
+
+    # Parse verbose_json response
+    raw_segments: list[TranscriptionSegment] = []
+    
+    # Extract timestamps from response
+    words_data = result_json.get("timestamps", {}).get("word", [])
+    
+    if not words_data:
+        logger.warning("No words found in Typhoon ASR response.")
+        
+    # Group words into segments (since the API doesn't seem to return a 'segment' array natively or we can just build our own from words)
+    # Actually, let's check if there is a 'segment' array
+    segment_data = result_json.get("timestamps", {}).get("segment", [])
+    
+    if segment_data:
+        # If API gives segments, use them
+        for i, s in enumerate(segment_data):
+            start = s.get("start", 0)
+            end = s.get("end", 0)
+            text = s.get("text", "")
+            
+            # Find words that fall in this segment
+            seg_words = []
+            for w in words_data:
+                if w.get("start", 0) >= start and w.get("end", 0) <= end:
+                    seg_words.append(WordTimestamp(
+                        word=w.get("text", ""),
+                        start=w.get("start", 0),
+                        end=w.get("end", 0),
+                        confidence=w.get("confidence", 1.0)
+                    ))
+            
+            raw_segments.append(TranscriptionSegment(
+                id=i,
+                text=text,
+                start=start,
+                end=end,
+                words=seg_words
+            ))
     else:
-        vad_threshold = 0.40
-        min_silence_ms = 400
-        min_speech_ms = 150
-        speech_pad_ms = 150
-        compression_thresh = 1.8
-        log_prob_thresh = -0.5
-        no_speech_thresh = 0.5
-        temperature = 0.0
-        beam = 5
-        best = 5
-        use_prev_text = False         # Off for non-Thai to prevent hallucination
+        # Build fake segments from words (e.g., group by pauses > 0.5s)
+        current_segment_words = []
+        seg_id = 0
+        
+        for w in words_data:
+            if not current_segment_words:
+                current_segment_words.append(w)
+                continue
+                
+            last_word = current_segment_words[-1]
+            # If gap > 0.5s or we have > 10 words, start new segment
+            if w.get("start", 0) - last_word.get("end", 0) > 0.5 or len(current_segment_words) >= 15:
+                # Close segment
+                start = current_segment_words[0].get("start", 0)
+                end = current_segment_words[-1].get("end", 0)
+                text = " ".join(cw.get("text", "") for cw in current_segment_words)
+                
+                raw_segments.append(TranscriptionSegment(
+                    id=seg_id,
+                    text=text,
+                    start=start,
+                    end=end,
+                    words=[WordTimestamp(word=cw.get("text", ""), start=cw.get("start", 0), end=cw.get("end", 0), confidence=cw.get("confidence", 1.0)) for cw in current_segment_words]
+                ))
+                seg_id += 1
+                current_segment_words = [w]
+            else:
+                current_segment_words.append(w)
+                
+        if current_segment_words:
+            start = current_segment_words[0].get("start", 0)
+            end = current_segment_words[-1].get("end", 0)
+            text = " ".join(cw.get("text", "") for cw in current_segment_words)
+            raw_segments.append(TranscriptionSegment(
+                id=seg_id,
+                text=text,
+                start=start,
+                end=end,
+                words=[WordTimestamp(word=cw.get("text", ""), start=cw.get("start", 0), end=cw.get("end", 0), confidence=cw.get("confidence", 1.0)) for cw in current_segment_words]
+            ))
 
-    # --- Primary transcription with VAD ---
-    logger.info(f"Transcribing: model={model_size.value}, language={language}, VAD=True, thai_mode={is_thai}")
-
-    segments_iter, info = model.transcribe(
-        actual_audio_path,
-        # VAD filter — critical for preventing hallucination on silence
-        vad_filter=True,
-        vad_parameters={
-            "threshold": vad_threshold,
-            "min_silence_duration_ms": min_silence_ms,
-            "min_speech_duration_ms": min_speech_ms,
-            "speech_pad_ms": speech_pad_ms,
-        },
-        # Beam search — larger for Thai to explore more consonant hypotheses
-        beam_size=beam,
-        best_of=best,
-        temperature=temperature,
-        # For Thai: True helps carry context (consonant disambiguation)
-        # For others: False prevents repetition loops ("โอเคโอเค...", "โนโนโน...")
-        condition_on_previous_text=use_prev_text,
-        # Context
-        initial_prompt=prompt if prompt else None,
-        # Language
-        language=language,  # None = auto-detect
-        # Word timestamps
-        word_timestamps=True,
-        # Anti-hallucination thresholds
-        compression_ratio_threshold=compression_thresh,
-        log_prob_threshold=log_prob_thresh,
-        no_speech_threshold=no_speech_thresh,
-    )
-
-    detected_language = info.language
-    total_duration = info.duration
-
-    if on_progress:
-        lang_display = detected_language.upper() if detected_language else "??"
-        on_progress(20, f"Detected language: {lang_display}. Processing segments...")
-
-    # Materialize segments
-    raw_segments = list(segments_iter)
     logger.info(f"Raw transcription: {len(raw_segments)} segments")
 
-    # --- Fallback if VAD produced 0 segments ---
-    if not raw_segments:
-        if on_progress:
-            on_progress(40, "No speech with VAD. Retrying with relaxed settings...")
-
-        # Fallback with even more relaxed settings
-        fallback_log_prob = -1.0 if is_thai else -0.8
-        fallback_temp = (0.0, 0.2, 0.4, 0.6) if is_thai else 0.0
-        logger.info(f"Fallback: VAD=False, relaxed thresholds, thai={is_thai}")
-        segments_iter2, info2 = model.transcribe(
-            actual_audio_path,
-            vad_filter=False,
-            beam_size=beam,
-            best_of=best,
-            temperature=fallback_temp,
-            condition_on_previous_text=use_prev_text,
-            initial_prompt=prompt if prompt else None,
-            language=language,
-            word_timestamps=True,
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=fallback_log_prob,
-            no_speech_threshold=0.6,
-        )
-        raw_segments = list(segments_iter2)
-        if info2:
-            detected_language = info2.language or detected_language
-            total_duration = info2.duration or total_duration
-        logger.info(f"Fallback: {len(raw_segments)} segments")
-
-    # --- Post-processing: filter hallucinations ---
     if on_progress:
         on_progress(70, "Filtering hallucinations...")
 
     clean_segments = _filter_hallucinations(raw_segments)
-    logger.info(f"After hallucination filter: {len(clean_segments)}/{len(raw_segments)} segments kept")
-
-    # --- Post-processing: Thai word corrections (dictionary) ---
+    
+    # Process Thai word corrections
     if is_thai and on_progress:
         on_progress(73, "Applying Thai word corrections...")
 
-    # Build initial result segments (before AI correction)
     result_segments: list[TranscriptionSegment] = []
-    seg_count = 0
-
-    for seg in clean_segments:
+    for i, seg in enumerate(clean_segments):
         seg_text = seg.text.strip()
-
-        # Apply dictionary-based Thai corrections
         if is_thai:
             seg_text = _apply_thai_corrections(seg_text)
 
         words: list[WordTimestamp] = []
-        if seg.words:
-            for w in seg.words:
-                word_text = w.word.strip()
-                if is_thai:
-                    word_text = _apply_thai_corrections(word_text)
-                words.append(WordTimestamp(
-                    word=word_text,
-                    start=round(w.start, 3),
-                    end=round(w.end, 3),
-                    confidence=round(w.probability, 3),
-                ))
+        for w in seg.words:
+            word_text = w.word.strip()
+            if is_thai:
+                word_text = _apply_thai_corrections(word_text)
+            words.append(WordTimestamp(
+                word=word_text,
+                start=w.start,
+                end=w.end,
+                confidence=w.confidence,
+            ))
 
         result_segments.append(TranscriptionSegment(
-            id=seg_count,
+            id=i,
             text=seg_text,
-            start=round(seg.start, 3),
-            end=round(seg.end, 3),
+            start=seg.start,
+            end=seg.end,
             words=words,
         ))
-        seg_count += 1
 
-        if on_progress and total_duration > 0:
-            pct = min(74, int(70 + (seg.end / total_duration) * 4))
-            on_progress(pct, f"Segment {seg_count}: {seg_text[:40]}...")
-
-    # --- PASS 2: Lyrics Search (Thai only) ---
-    # Now that Whisper gave us rough text, search the web for correct lyrics.
-    # This is FREE (no API key needed) and gives us accurate reference lyrics.
+    # PASS 2 & 3: Lyrics Search and Typhoon LLM Correction
+    reference_lyrics = None
+    song_info = ""
+    
     if is_thai and result_segments:
         if on_progress:
             on_progress(75, "🔍 Searching for song lyrics online...")
 
         whisper_texts = [seg.text for seg in result_segments]
-        logger.info(f"Pass 2: Searching lyrics for {len(whisper_texts)} Whisper segments")
-
+        
         try:
-            from lyrics_search import search_lyrics, search_lyrics_with_gemini
+            from lyrics_search import search_lyrics, search_lyrics_with_typhoon
 
-            # Method 1: Free web search (DuckDuckGo → Thai lyrics sites)
             search_result = search_lyrics(whisper_texts)
-
-            # Method 2: Fallback to Gemini text-only (cheap)
             if not search_result:
-                logger.info("Web search found nothing, trying Gemini text identification")
-                if on_progress:
-                    on_progress(76, "🤖 AI identifying song...")
-                search_result = search_lyrics_with_gemini(whisper_texts)
+                search_result = search_lyrics_with_typhoon(whisper_texts)
 
             if search_result and search_result.get("lyrics"):
                 reference_lyrics = search_result["lyrics"]
                 song_info = search_result.get("song", "") or ""
-                source = search_result.get("source", "")
-                logger.info(
-                    f"🎵 Pass 2: Found '{song_info}' — "
-                    f"{len(reference_lyrics)} lyrics lines from {source}"
-                )
                 if on_progress:
                     on_progress(78, f"🎵 Found: {song_info} ({len(reference_lyrics)} lines)")
-            else:
-                logger.info("Pass 2: No lyrics found from any source")
         except Exception as e:
-            logger.warning(f"Pass 2 lyrics search failed (non-fatal): {e}")
+            logger.warning(f"Pass 2 lyrics search failed: {e}")
 
-    # --- PASS 3: Gemini text correction using reference lyrics ---
-    # Send Whisper's text to Gemini for correction.
-    # If we found reference lyrics in Pass 2, include them for much better accuracy.
-    # This keeps Whisper's timestamps perfectly aligned.
-    if is_thai and result_segments:
         try:
-            from gemini_correction import is_available, correct_thai_transcription
+            from typhoon_correction import is_available, correct_thai_transcription
             import asyncio
 
             if is_available():
                 if on_progress:
-                    if reference_lyrics:
-                        on_progress(80, "🤖 Pass 3: AI correcting with reference lyrics...")
-                    else:
-                        on_progress(80, "🤖 AI correcting Thai text...")
+                    on_progress(80, "🤖 Typhoon correcting Thai text...")
 
-                logger.info("Pass 3: Gemini text correction")
                 original_texts = [seg.text for seg in result_segments]
+                reference = " ".join(reference_lyrics) if reference_lyrics else ""
 
-                # Build reference context from Pass 2 lyrics search
-                reference = ""
-                if reference_lyrics:
-                    reference = " ".join(reference_lyrics)
-                    logger.info(f"Using {len(reference_lyrics)} reference lyrics for correction")
-
-                loop = None
                 try:
                     loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    pass
-
-                if loop and loop.is_running():
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as pool:
                         corrected_texts = pool.submit(
                             lambda: asyncio.run(
-                                correct_thai_transcription(
-                                    original_texts, on_progress, reference
-                                )
+                                correct_thai_transcription(original_texts, on_progress, reference)
                             )
                         ).result(timeout=90)
-                else:
+                except RuntimeError:
                     corrected_texts = asyncio.run(
-                        correct_thai_transcription(
-                            original_texts, on_progress, reference
-                        )
+                        correct_thai_transcription(original_texts, on_progress, reference)
                     )
 
-                # Apply corrections — only change TEXT, keep all timestamps
-                corrections_applied = 0
                 for i, (seg, corrected) in enumerate(zip(result_segments, corrected_texts)):
                     if corrected != seg.text:
-                        corrections_applied += 1
-                        logger.info(f"  Fix [{i}]: '{seg.text}' → '{corrected}'")
                         seg.text = corrected
-                        # Rebuild word timestamps within this segment's time range
                         new_words = corrected.strip().split()
                         if new_words:
                             dur = seg.end - seg.start
@@ -655,34 +452,24 @@ def transcribe_audio(
                                     confidence=0.95,
                                 ) for j, w in enumerate(new_words)
                             ]
-
-                logger.info(f"Pass 3: {corrections_applied}/{len(result_segments)} segments corrected")
-                if on_progress:
-                    msg = f"🎵 {song_info} — {corrections_applied} fixed" if song_info else f"AI corrected {corrections_applied} segments"
-                    on_progress(85, msg)
         except Exception as e:
-            logger.warning(f"Pass 3 correction failed (non-fatal): {e}")
+            logger.warning(f"Pass 3 correction failed: {e}")
 
-
-    duration = result_segments[-1].end if result_segments else total_duration
-
-    # Cleanup extracted audio
-    if extracted_audio and os.path.exists(extracted_audio):
+    # Cleanup extracted audio if we created a temp one
+    if actual_audio_path != audio_path and os.path.exists(actual_audio_path):
         try:
-            os.remove(extracted_audio)
+            os.remove(actual_audio_path)
         except Exception:
             pass
 
-    if on_progress:
-        if result_segments:
-            on_progress(100, f"Done — {len(result_segments)} segments")
-        else:
-            on_progress(100, "Done — no speech detected")
+    duration = result_segments[-1].end if result_segments else 0.0
+    detected_language = result_json.get("language", language or "en")
 
-    logger.info(f"Final: {len(result_segments)} segments, lang={detected_language}")
+    if on_progress:
+        on_progress(100, f"Done — {len(result_segments)} segments")
 
     return TranscriptionResult(
         segments=result_segments,
-        language=detected_language or "en",
+        language=detected_language,
         duration=duration,
     )

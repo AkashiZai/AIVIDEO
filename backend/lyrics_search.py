@@ -1,16 +1,18 @@
 """
 Thai Lyrics Search — find correct song lyrics from the web.
 
-Instead of relying on Gemini audio processing (expensive, rate-limited),
-this module searches Thai lyrics websites to find the correct lyrics
+Searches Thai lyrics websites to find the correct lyrics
 for a song identified from Whisper's rough transcription.
+Fallback: Uses Typhoon Thai LLM to identify songs from rough text.
 
 Flow:
 1. Take rough text from Whisper
 2. Search the web for matching Thai song lyrics
-3. Return accurate lyrics for comparison/correction
+3. If web search fails, use Typhoon LLM to identify the song
+4. Return accurate lyrics for comparison/correction
 
-No API key needed — uses free web search.
+Web search: No API key needed — uses free DuckDuckGo search.
+Typhoon fallback: Requires TYPHOON_API_KEY environment variable.
 """
 from __future__ import annotations
 import json
@@ -197,7 +199,7 @@ def search_lyrics(
 
     Args:
         whisper_texts: Rough transcription from Whisper
-        song_name: Song name if known (from Gemini identification)
+        song_name: Song name if known (from Typhoon identification)
 
     Returns dict with:
         - source: str (URL where lyrics were found)
@@ -272,22 +274,24 @@ def search_lyrics(
     return None
 
 
-def search_lyrics_with_gemini(
+def search_lyrics_with_typhoon(
     whisper_texts: list[str],
 ) -> dict | None:
     """
-    Fallback: Use Gemini text-only to identify song and recall lyrics.
-    Much cheaper than audio processing.
+    Fallback: Use Typhoon Thai LLM to identify song and recall lyrics.
+    Typhoon has deep knowledge of Thai music and culture.
     """
     try:
-        from gemini_correction import _call_gemini, GEMINI_API_KEY
-        if not GEMINI_API_KEY:
+        from typhoon_correction import _call_typhoon, TYPHOON_API_KEY
+        if not TYPHOON_API_KEY:
             return None
 
         # Take a sample of Whisper text
         sample = " ".join(whisper_texts[:10])
 
-        prompt = f"""จากเนื้อเพลงคร่าวๆ ที่ AI ถอดมา (อาจมีคำผิดมาก):
+        system_prompt = "คุณเป็นผู้เชี่ยวชาญเพลงไทย มีความรู้เพลงไทยทุกยุคทุกสมัย ตอบเป็น JSON เท่านั้น"
+
+        user_prompt = f"""จากเนื้อเพลงคร่าวๆ ที่ AI ถอดมา (อาจมีคำผิดมาก):
 {sample}
 
 1. ระบุชื่อเพลงไทยนี้ให้ได้
@@ -296,15 +300,15 @@ def search_lyrics_with_gemini(
 {{"song": "ชื่อเพลง", "artist": "ศิลปิน", "lyrics": ["บรรทัด1", "บรรทัด2", ...]}}
 4. ถ้าจำไม่ได้ ให้ตอบ {{"song": null, "artist": null, "lyrics": []}}"""
 
-        result = _call_gemini(prompt)
+        result = _call_typhoon(system_prompt, user_prompt)
         if not result:
             return None
 
-        candidates = result.get("candidates", [])
-        if not candidates:
+        choices = result.get("choices", [])
+        if not choices:
             return None
 
-        text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        text = choices[0].get("message", {}).get("content", "")
 
         try:
             data = json.loads(text)
@@ -326,13 +330,13 @@ def search_lyrics_with_gemini(
         if len(lyrics) < 3:
             return None
 
-        logger.info(f"Gemini text identified: '{song}' by '{artist}' ({len(lyrics)} lines)")
+        logger.info(f"Typhoon identified: '{song}' by '{artist}' ({len(lyrics)} lines)")
         return {
-            "source": "gemini-text",
+            "source": "typhoon-text",
             "lyrics": lyrics,
             "song": f"{song} — {artist}" if artist else song,
         }
 
     except Exception as e:
-        logger.warning(f"Gemini lyrics search failed: {e}")
+        logger.warning(f"Typhoon lyrics search failed: {e}")
         return None
